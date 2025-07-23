@@ -30,6 +30,9 @@ const visualState = {
   endOfFileResetStartTime: null
 };
 
+// Add these at the top of your file
+let canvas, ctx, drawCallback;
+
 // Initialize application
 async function init() {
   try {
@@ -55,7 +58,9 @@ async function init() {
     
     // Initialize canvas AFTER file input
     console.log('🖼️ Initializing canvas...');
-    const { canvas, ctx } = initializeCanvas();
+    const canvasObj = initializeCanvas();
+    canvas = canvasObj.canvas;
+    ctx = canvasObj.ctx;
     if (!canvas || !ctx) {
       throw new Error('Canvas initialization failed!');
     }
@@ -72,7 +77,7 @@ async function init() {
     console.log('✅ Keyboard controls set up');
 
     // Enhanced draw callback
-    const drawCallback = () => {
+    drawCallback = () => {
       const audioState = getAudioState();
       
       if (audioState.waveform && audioState.audioBuffer) {
