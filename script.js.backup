@@ -1,0 +1,588 @@
+const canvas = document.getElementById("waveCanvas");
+const ctx = canvas.getContext("2d");
+setupHiDPI(canvas, ctx);
+
+function setupHiDPI(canvas, context) {
+  const dpr = window.devicePixelRatio || 1;
+  // Keep high internal resolution
+  const displayWidth = 800;
+  const displayHeight = 800;
+
+  // Set actual pixel size (remains high-res)
+  canvas.width = displayWidth * dpr;
+  canvas.height = displayHeight * dpr;
+
+  // Set display size (CSS pixels) to shrink on screen
+  canvas.style.width = "800px"; // or any smaller value you want
+  canvas.style.height = "800px";
+
+  // Reset transform before scaling
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.scale(dpr, dpr);
+}
+
+const fileInput = document.getElementById("fileInput");
+
+fileInput.addEventListener("change", handleFileSelect);
+
+async function handleFileSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const arrayBuffer = await file.arrayBuffer();
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  const channelData = audioBuffer.getChannelData(0);
+
+  // Add phantom 30s of silence at the end
+  const sampleRate = audioBuffer.sampleRate;
+  const phantomSamples = new Float32Array(30 * sampleRate); // 30 seconds of silence
+  const paddedWaveform = new Float32Array(
+    channelData.length + phantomSamples.length
+  );
+  paddedWaveform.set(channelData, 0);
+  paddedWaveform.set(phantomSamples, channelData.length);
+
+  window.currentWaveform = paddedWaveform;
+  window.audioBuffer = audioBuffer; // Store for duration info
+
+  // Pre-calculate global max amplitude for consistent scaling (safe for large arrays)
+  let globalMaxAmp = 0;
+  for (let i = 0; i < channelData.length; i++) { // Use channelData, not paddedWaveform
+    const absValue = Math.abs(channelData[i]);
+    if (absValue > globalMaxAmp) {
+      globalMaxAmp = absValue;
+    }
+  }
+  window.globalMaxAmp = globalMaxAmp;
+
+  // Use normalized playhead here too
+  const actualDuration = audioBuffer.duration;
+  drawRadialWaveform(
+    paddedWaveform,
+    currentPlayhead / actualDuration,
+    isPlaying
+  );
+}
+
+function downsample(data, numSamples) {
+  const blockSize = Math.floor(data.length / numSamples);
+  const filtered = [];
+
+  for (let i = 0; i < numSamples; i++) {
+    let maxInBlock = 0;
+    for (let j = 0; j < blockSize; j++) {
+      const absValue = Math.abs(data[i * blockSize + j]);
+      if (absValue > maxInBlock) {
+        maxInBlock = absValue;
+      }
+    }
+    filtered.push(maxInBlock);
+  }
+
+  return filtered;
+}
+
+function drawLinearWaveform(waveform) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+  const dpr = window.devicePixelRatio || 1;
+  ctx.scale(dpr, dpr); // Scale for HiDPI
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const width = canvas.width / dpr;
+  const height = canvas.height / dpr;
+  const middleY = height / 2;
+
+  const barWidth = 3;
+  const gap = 3;
+  const numBars = Math.floor(width / (barWidth + gap));
+  const downsampled = downsample(waveform, numBars);
+
+  ctx.fillStyle = "#0ff";
+  for (let i = 0; i < numBars; i++) {
+    const x = i * (barWidth + gap);
+    const amp = downsampled[i];
+    const barHeight = amp * height * 0.8;
+    ctx.fillRect(x, middleY - barHeight / 2, barWidth, barHeight);
+  }
+}
+
+function drawRadialWaveform(waveform, playhead = 0, isPlaying = false) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const dpr = window.devicePixelRatio || 1;
+  ctx.scale(dpr, dpr);
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const width = canvas.width / dpr;
+  const height = canvas.height / dpr;
+  const cx = width / 2;
+  const cy = height / 2;
+
+  // Circular player parameters - scale to fill canvas
+  const buttonRadius = Math.min(width, height) * 0.18;
+  const waveformInnerRadius = buttonRadius + Math.min(width, height) * 0.05;
+  const maxWaveformThickness = Math.min(width, height) * 0.2;
+  const minWaveformThickness = Math.min(width, height) * 0.005;
+  const waveformArcLength = Math.PI * 2;
+
+  let windowData, numPoints, downsampled, maxAmp;
+  let fullFileData, windowDataForTransition;
+
+  // Always prepare both data sets during transition
+  if (animationProgress > 0 || isTransitioning) {
+    // Prepare full file data
+    const actualAudioData = window.audioBuffer ? 
+      window.audioBuffer.getChannelData(0) : 
+      waveform.slice(0, waveform.length - (30 * 44100));
+    
+    // Prepare window data
+    const windowDuration = 30;
+    const sampleRate = window.audioBuffer ? window.audioBuffer.sampleRate : 44100;
+    const samplesPerWindow = windowDuration * sampleRate;
+    const actualSamples = window.audioBuffer ? window.audioBuffer.length : waveform.length - 30 * sampleRate;
+    const actualDuration = window.audioBuffer ? window.audioBuffer.duration : waveform.length / sampleRate;
+    
+    const currentTimeInFile = playhead * actualDuration;
+    let startSample = Math.round(currentTimeInFile * sampleRate);
+    let endSample = startSample + samplesPerWindow;
+    
+    if (endSample <= waveform.length) {
+      windowDataForTransition = waveform.slice(startSample, endSample);
+    } else {
+      const firstPart = waveform.slice(startSample);
+      const secondPart = waveform.slice(0, endSample - waveform.length);
+      windowDataForTransition = [...firstPart, ...secondPart];
+    }
+
+    // Interpolate numPoints smoothly during transition
+    const minPoints = 1000;  // Full file view
+    const maxPoints = 1000; // Focus view
+    numPoints = Math.round(minPoints + (maxPoints - minPoints) * animationProgress);
+    
+    // Interpolate between full file and window data
+    const fullFileDownsampled = downsample(actualAudioData, numPoints);
+    const windowDownsampled = downsample(windowDataForTransition, numPoints);
+    
+    // Blend the two datasets based on animation progress
+    downsampled = fullFileDownsampled.map((fullVal, i) => {
+      const windowVal = windowDownsampled[i] || 0;
+      return fullVal * (1 - animationProgress) + windowVal * animationProgress;
+    });
+    
+    // Interpolate normalization
+    const globalMaxAmp = window.globalMaxAmp || 1;
+    
+    // Calculate window max for interpolation
+    const windowMaxAmp = Math.max(...windowDownsampled);
+    const windowToGlobalRatio = windowMaxAmp / globalMaxAmp;
+    const targetWindowMax = globalMaxAmp * Math.max(windowToGlobalRatio, 0.1);
+    
+    maxAmp = globalMaxAmp * (1 - animationProgress) + targetWindowMax * animationProgress;
+    
+  } else if (!isPlaying && currentPlayhead <= 0.001) {
+    // Static idle state - show full file
+    const actualAudioData = window.audioBuffer ? 
+      window.audioBuffer.getChannelData(0) : 
+      waveform.slice(0, waveform.length - (30 * 44100));
+    
+    numPoints = 1500;
+    downsampled = downsample(actualAudioData, numPoints);
+    maxAmp = window.globalMaxAmp;
+    
+  } else {
+    // Full playback state - use existing logic
+    const windowDuration = 30;
+    const sampleRate = window.audioBuffer ? window.audioBuffer.sampleRate : 44100;
+    const samplesPerWindow = windowDuration * sampleRate;
+    const actualDuration = window.audioBuffer ? window.audioBuffer.duration : waveform.length / sampleRate;
+    
+    const currentTimeInFile = playhead * actualDuration;
+    let startSample = Math.round(currentTimeInFile * sampleRate);
+    let endSample = startSample + samplesPerWindow;
+    
+    if (endSample <= waveform.length) {
+      windowData = waveform.slice(startSample, endSample);
+    } else {
+      const firstPart = waveform.slice(startSample);
+      const secondPart = waveform.slice(0, endSample - waveform.length);
+      windowData = [...firstPart, ...secondPart];
+    }
+
+    numPoints = 1500;
+    downsampled = downsample(windowData, numPoints);
+
+    // Use dynamic window-based normalization during playback
+    const now = performance.now();
+    if (now - lastNormalizationTime > normalizationInterval) {
+      const peakDetectionDuration = 10;
+      const peakDetectionSamples = peakDetectionDuration * sampleRate;
+      const peakDetectionWindow = windowData.slice(0, peakDetectionSamples);
+      const peakDetectionDownsampled = downsample(peakDetectionWindow, Math.floor(numPoints * (10/30)));
+      
+      const windowMaxAmp = Math.max(...peakDetectionDownsampled);
+      const globalMaxAmp = window.globalMaxAmp || 1;
+      
+      const windowToGlobalRatio = windowMaxAmp / globalMaxAmp;
+      targetWindowMaxAmp = globalMaxAmp * Math.max(windowToGlobalRatio, 0.1);
+      
+      lastNormalizationTime = now;
+    }
+
+    currentWindowMaxAmp += (targetWindowMaxAmp - currentWindowMaxAmp) * 0.05;
+    maxAmp = currentWindowMaxAmp;
+  }
+
+  // Fixed playhead at 12:00 (angle = -Math.PI/2)
+  const playheadAngle = -Math.PI / 2;
+  const rotationOffset = 0;
+
+  // Draw waveform arc
+  ctx.save();
+  ctx.beginPath();
+
+  // Draw outer edge with animated taper
+  for (let i = 0; i < numPoints; i++) {
+    const t = i / (numPoints - 1);
+    const angle = playheadAngle + t * waveformArcLength - rotationOffset;
+
+    // Animate taper introduction
+    const taperAmount = (1 - t * 0.95) * animationProgress + 1 * (1 - animationProgress);
+    const thickness = maxWaveformThickness * taperAmount + minWaveformThickness * animationProgress;
+
+    // Get amplitude for this point
+    const amp = downsampled[i] || 0;
+    const normalizedAmp = maxAmp > 0 ? amp / maxAmp : 0;
+
+    // Calculate radius with amplitude
+    const radius = waveformInnerRadius + normalizedAmp * thickness;
+
+    const x = Math.round(cx + radius * Math.cos(angle));
+    const y = Math.round(cy + radius * Math.sin(angle));
+
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+
+  // Draw inner edge of waveform (baseline) - reverse direction
+  for (let i = numPoints - 1; i >= 0; i--) {
+    const t = i / (numPoints - 1);
+    const angle = playheadAngle + t * waveformArcLength - rotationOffset;
+
+    const x = cx + waveformInnerRadius * Math.cos(angle);
+    const y = cy + waveformInnerRadius * Math.sin(angle);
+
+    ctx.lineTo(x, y);
+  }
+
+  ctx.closePath();
+  ctx.fillStyle = "rgba(0,255,255,0.6)";
+  ctx.fill();
+  ctx.strokeStyle = "#0ff";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+
+  // Draw fixed playhead at 12:00
+  ctx.save();
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  const playheadInnerRadius = waveformInnerRadius - 5;
+  const playheadOuterRadius = waveformInnerRadius + maxWaveformThickness;
+
+  ctx.moveTo(cx, cy - playheadInnerRadius);
+  ctx.lineTo(cx, cy - playheadOuterRadius);
+  ctx.stroke();
+  ctx.restore();
+
+  // Draw central play/pause button
+  drawPlayPauseButton(cx, cy, buttonRadius, isPlaying);
+}
+
+function drawPlayPauseButton(x, y, radius, isPlaying) {
+  ctx.save();
+
+  // Draw circular button background
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, 2 * Math.PI);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+  ctx.fill();
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Draw play or pause icon
+  ctx.fillStyle = "#fff";
+  if (isPlaying) {
+    // Draw pause icon (two rectangles)
+    const barWidth = radius * 0.3;
+    const barHeight = radius * 0.8;
+    const spacing = radius * 0.2;
+    ctx.fillRect(
+      x - spacing - barWidth / 2,
+      y - barHeight / 2,
+      barWidth,
+      barHeight
+    );
+    ctx.fillRect(
+      x + spacing - barWidth / 2,
+      y - barHeight / 2,
+      barWidth,
+      barHeight
+    );
+  } else {
+    // Draw play icon (triangle)
+    const size = radius * 0.6;
+    ctx.beginPath();
+    ctx.moveTo(x - size / 3, y - size / 2);
+    ctx.lineTo(x - size / 3, y + size / 2);
+    ctx.lineTo(x + (size * 2) / 3, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+// Add click handler for play/pause button
+let isPlaying = false;
+let currentPlayhead = 0; // seconds
+
+canvas.addEventListener("mousedown", (event) => {
+  const rect = canvas.getBoundingClientRect();
+  const x =
+    ((event.clientX - rect.left) *
+      (canvas.width / canvas.style.width.replace("px", ""))) /
+    (window.devicePixelRatio || 1);
+  const y =
+    ((event.clientY - rect.top) *
+      (canvas.height / canvas.style.height.replace("px", ""))) /
+    (window.devicePixelRatio || 1);
+
+  const cx = canvas.width / (window.devicePixelRatio || 1) / 2;
+  const cy = canvas.height / (window.devicePixelRatio || 1) / 2;
+  const distance = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+
+  // Calculate button radius same as in drawRadialWaveform
+  const width = canvas.width / (window.devicePixelRatio || 1);
+  const height = canvas.height / (window.devicePixelRatio || 1);
+  const buttonRadius = Math.min(width, height) * 0.18;
+  const waveformInnerRadius = buttonRadius + Math.min(width, height) * 0.05;
+  const maxWaveformThickness = Math.min(width, height) * 0.2;
+  const waveformOuterRadius = waveformInnerRadius + maxWaveformThickness;
+
+  // Check if click is within button radius
+  if (distance <= buttonRadius) {
+    const wasPlaying = isPlaying;
+    isPlaying = !isPlaying;
+    
+    // Simplified transition logic: only transition when starting from very beginning
+    const shouldTransition = (wasPlaying !== isPlaying) && (currentPlayhead <= 0.001);
+    
+    if (shouldTransition) {
+      isTransitioning = true;
+      transitionStartTime = performance.now();
+    }
+    
+    // Redraw with current state if we have waveform data
+    if (window.currentWaveform && window.audioBuffer) {
+      const actualDuration = window.audioBuffer.duration;
+      drawRadialWaveform(
+        window.currentWaveform,
+        currentPlayhead / actualDuration,
+        isPlaying
+      );
+    }
+  } 
+  // Check if click is within waveform area
+  else if (distance >= waveformInnerRadius && distance <= waveformOuterRadius) {
+    isDragging = true;
+    
+    // Calculate angle from center (0 = top, clockwise)
+    const angle = Math.atan2(y - cy, x - cx);
+    // Convert to 0-2π range starting from top (12 o'clock)
+    const normalizedAngle = (angle + Math.PI / 2 + 2 * Math.PI) % (2 * Math.PI);
+    
+    // Store the starting angle and playhead for relative dragging
+    dragStartAngle = normalizedAngle;
+    dragStartPlayhead = currentPlayhead;
+    
+    // Pause playback during scrubbing
+    if (isPlaying) {
+      isPlaying = false;
+    }
+  }
+});
+
+// Update the mousemove event listener:
+canvas.addEventListener("mousemove", (event) => {
+  if (!isDragging) return;
+  
+  const rect = canvas.getBoundingClientRect();
+  const x =
+    ((event.clientX - rect.left) *
+      (canvas.width / canvas.style.width.replace("px", ""))) /
+    (window.devicePixelRatio || 1);
+  const y =
+    ((event.clientY - rect.top) *
+      (canvas.height / canvas.style.height.replace("px", ""))) /
+    (window.devicePixelRatio || 1);
+
+  const cx = canvas.width / (window.devicePixelRatio || 1) / 2;
+  const cy = canvas.height / (window.devicePixelRatio || 1) / 2;
+  
+  // Calculate current angle from center
+  const angle = Math.atan2(y - cy, x - cx);
+  // Convert to 0-2π range starting from top (12 o'clock)
+  const normalizedAngle = (angle + Math.PI / 2 + 2 * Math.PI) % (2 * Math.PI);
+  
+  // Calculate the difference from start angle (reverse direction)
+  let angleDiff = dragStartAngle - normalizedAngle;
+  
+  // Handle wrap-around for smooth dragging across 0°
+  if (angleDiff > Math.PI) {
+    angleDiff -= 2 * Math.PI;
+  } else if (angleDiff < -Math.PI) {
+    angleDiff += 2 * Math.PI;
+  }
+  
+  // Convert angle difference to time difference
+  const actualDuration = window.audioBuffer ? window.audioBuffer.duration : 180;
+  const timeDiff = (angleDiff / (2 * Math.PI)) * actualDuration;
+  
+  // Calculate the new playhead position
+  const newPlayhead = dragStartPlayhead + timeDiff;
+  const clampedPlayhead = Math.max(0, Math.min(actualDuration, newPlayhead));
+  
+  // Check if we need to trigger transition when moving away from beginning
+  if (dragStartPlayhead <= 0.001 && clampedPlayhead > 0.001 && !isTransitioning && animationProgress === 0) {
+    isTransitioning = true;
+    transitionStartTime = performance.now();
+  }
+  
+  // Check if we need to trigger transition when moving back to beginning
+  if (dragStartPlayhead > 0.001 && clampedPlayhead <= 0.001 && !isTransitioning && animationProgress === 1) {
+    isTransitioning = true;
+    transitionStartTime = performance.now();
+  }
+  
+  // Apply the new playhead position
+  currentPlayhead = clampedPlayhead;
+  
+  // Redraw at new position
+  if (window.currentWaveform && window.audioBuffer) {
+    drawRadialWaveform(
+      window.currentWaveform,
+      currentPlayhead / actualDuration,
+      isPlaying
+    );
+  }
+});
+
+canvas.addEventListener("mouseup", () => {
+  isDragging = false;
+});
+
+// Also handle mouse leave to stop dragging
+canvas.addEventListener("mouseleave", () => {
+  isDragging = false;
+});
+
+// Animation loop for rotating waveform
+let lastTimestamp = null;
+let lastDrawTime = 0;
+const targetFPS = 120; // Increased from 60 to 120
+const frameInterval = 1000 / targetFPS; // Now ~8.33ms instead of 16.67ms
+
+function animate(timestamp) {
+  if (!lastTimestamp) lastTimestamp = timestamp;
+  const delta = (timestamp - lastTimestamp) / 1000;
+  lastTimestamp = timestamp;
+
+  // Frame rate limiting for 120Hz
+  if (timestamp - lastDrawTime < frameInterval) {
+    requestAnimationFrame(animate);
+    return;
+  }
+  lastDrawTime = timestamp;
+
+  // Handle transition animation
+  if (isTransitioning) {
+    const elapsed = timestamp - transitionStartTime;
+    const progress = Math.min(elapsed / transitionDuration, 1);
+    
+    // Determine transition direction based on current state, not isPlaying
+    const shouldBeInFocusView = isPlaying || currentPlayhead > 0.001;
+    
+    // Use easing function for smooth transition
+    animationProgress = shouldBeInFocusView ? 
+      easeInOutCubic(progress) : 
+      1 - easeInOutCubic(progress);
+    
+    if (progress >= 1) {
+      isTransitioning = false;
+      animationProgress = shouldBeInFocusView ? 1 : 0;
+      
+      // Only reset playhead AFTER transition is complete AND we're returning to start
+      if (!isPlaying && !shouldBeInFocusView && currentPlayhead >= (window.audioBuffer ? window.audioBuffer.duration : 180)) {
+        currentPlayhead = 0;
+      }
+    }
+  }
+
+  if (isPlaying && window.currentWaveform) {
+    const actualDuration = window.audioBuffer ? window.audioBuffer.duration : 180;
+
+    // Advance playhead in seconds, time-based
+    currentPlayhead += delta;
+
+    // Stop playback when playhead reaches end of actual audio
+    if (currentPlayhead >= actualDuration) {
+      isPlaying = false;
+      // Trigger reverse transition back to full view
+      isTransitioning = true;
+      transitionStartTime = timestamp;
+    }
+  }
+
+  // Always redraw during transitions or when playing
+  if (isTransitioning || isPlaying || animationProgress > 0) {
+    if (window.currentWaveform && window.audioBuffer) {
+      const actualDuration = window.audioBuffer.duration;
+      drawRadialWaveform(
+        window.currentWaveform,
+        currentPlayhead / actualDuration,
+        isPlaying
+      );
+    }
+  }
+
+  requestAnimationFrame(animate);
+}
+
+// Start the animation loop
+requestAnimationFrame(animate);
+
+// Add these variables at the top with your other globals
+let lastNormalizationTime = 0;
+let currentWindowMaxAmp = 1;
+let targetWindowMaxAmp = 1;
+const normalizationInterval = 1000; // Update every 1 second (in milliseconds)
+
+// Animation variables for stretch transition
+let animationProgress = 0; // 0 = idle state, 1 = playback state
+let isTransitioning = false;
+const transitionDuration = 1000; // 1 second transition in milliseconds
+let transitionStartTime = 0;
+
+// Dragging variables
+let isDragging = false;
+let dragStartAngle = 0;
+let dragStartPlayhead = 0;
+
+// Add easing function for smooth transitions
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : (t - 1) * (2 * t - 2) * (2 * t - 2) + 1;
+}
