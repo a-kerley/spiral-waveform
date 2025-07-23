@@ -28,7 +28,6 @@ body {
   background: #111;
   border-radius: 16px;
   margin: 0 auto;
-  touch-action: none; /* Prevent browser scrolling/interference on touch */
 }
 
 #fileInput {
