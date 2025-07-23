@@ -14,9 +14,9 @@ export function setupResponsiveCanvas(canvas, context) {
 }
 
 export function initializeCanvas() {
-  // Create canvas element instead of looking for existing one
   const canvas = document.createElement('canvas');
   canvas.id = 'waveCanvas';
+  canvas.tabIndex = 0; // Make canvas focusable for accessibility/touch
   
   const ctx = canvas.getContext('2d');
   if (!ctx) {
