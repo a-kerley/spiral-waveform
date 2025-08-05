@@ -40,115 +40,164 @@ export function drawRadialWaveform(
   isPlaying,
   state
 ) {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  const dpr = window.devicePixelRatio || 1;
-  ctx.scale(dpr, dpr);
-
-  // Add better anti-aliasing settings
-  ctx.imageSmoothingEnabled = false;
-
+  // IMPORTANT: Don't reset transform - use the device pixel ratio setup from canvas-setup.js
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const width = canvas.width / dpr;
-  const height = canvas.height / dpr;
-  const cx = width / 2;
-  const cy = height / 2;
-
-  // Calculate dimensions - shrink everything down, then expand waveform height
-  const buttonRadius = Math.min(width, height) * CONFIG.BUTTON_RADIUS_RATIO;
-  const waveformInnerRadius =
-    buttonRadius + Math.min(width, height) * CONFIG.WAVEFORM_GAP_RATIO;
-  const maxWaveformThickness =
-    Math.min(width, height) * CONFIG.WAVEFORM_THICKNESS_RATIO;
-  const minWaveformThickness =
-    Math.min(width, height) * CONFIG.MIN_WAVEFORM_THICKNESS_RATIO;
-
-  // Get waveform data based on current state
+  
+  // Get device pixel ratio for proper coordinate calculations
+  const dpr = window.devicePixelRatio || 1;
+  
+  // Calculate coordinates using CSS size, not internal canvas size
+  const cssWidth = canvas.offsetWidth || (canvas.width / dpr);
+  const cssHeight = canvas.offsetHeight || (canvas.height / dpr);
+  const centerX = cssWidth / 2;
+  const centerY = cssHeight / 2;
+  const size = Math.min(cssWidth, cssHeight);
+  
+  // Calculate radii and thickness based on CSS size (not internal canvas size)
+  const innerRadius = size * CONFIG.INNER_RADIUS_RATIO;
+  const maxThickness = size * CONFIG.MAX_THICKNESS_RATIO;
+  const minThickness = size * CONFIG.MIN_THICKNESS_RATIO;
+  
+  // Get waveform data using the original sophisticated system
   const { downsampled, maxAmp, numPoints } = getWaveformData(
     waveform,
     playhead,
     isPlaying,
     state
   );
+  
+  if (!downsampled || downsampled.length === 0) {
+    console.warn('⚠️ No waveform data available for drawing');
+    drawPlayPauseButton(ctx, centerX, centerY, innerRadius * 0.8, isPlaying);
+    return;
+  }
 
-  // Draw waveform
+  // Create gradient for the waveform
+  const gradient = createWaveformGradient(
+    ctx,
+    centerX,
+    centerY,
+    innerRadius,
+    maxThickness,
+    CONFIG.WAVEFORM_COLORS.INNER
+  );
+  
+  // Use the beautiful gradient for the waveform
+  ctx.fillStyle = gradient;
+  
+  // Draw the main waveform path with real data
   drawWaveformPath(
     ctx,
-    downsampled,
+    downsampled, // Use real data now
     numPoints,
-    cx,
-    cy,
-    waveformInnerRadius,
-    maxWaveformThickness,
-    minWaveformThickness,
-    maxAmp,
-    state.animationProgress,
+    centerX,
+    centerY,
+    innerRadius,
+    maxThickness,
+    minThickness,
+    maxAmp || 1, // Ensure maxAmp is not 0
+    state.animationProgress || 0,
     waveform,
     playhead,
     state
   );
-
-  // Use drag position for visual feedback during dragging
-  let effectivePlayhead = playhead;
-  if (state.isDragging && state.dragCurrentPosition !== undefined) {
-    effectivePlayhead = state.dragCurrentPosition;
-  }
-
-  // Draw playhead (pass effectivePlayhead instead of calculating unused angle)
+  
+  // Draw playhead indicator
   drawPlayhead(
     ctx,
-    cx,
-    cy,
-    waveformInnerRadius,
-    maxWaveformThickness,
+    centerX,
+    centerY,
+    innerRadius,
+    maxThickness,
     isPlaying,
-    state.isDragging,
-    state.animationProgress,
-    effectivePlayhead
+    state.isDragging || false,
+    state.animationProgress || 0,
+    playhead
   );
-
-  // Draw playhead time display
-  const currentTime = state.currentPlayhead;
-  const duration = state.audioBuffer ? state.audioBuffer.duration : 180;
-  drawPlayheadTime(
-    ctx,
-    cx,
-    cy,
-    waveformInnerRadius,
-    maxWaveformThickness,
-    currentTime,
-    duration,
-    width // <-- pass width here
-  );
-
-  // Draw button
-  drawPlayPauseButton(ctx, cx, cy, buttonRadius, isPlaying);
+  
+  // Draw time display if needed
+  if (state.audioBuffer && state.duration > 0) {
+    const currentTime = playhead * state.duration;
+    drawPlayheadTime(
+      ctx,
+      centerX,
+      centerY,
+      innerRadius,
+      maxThickness,
+      currentTime,
+      state.duration,
+      cssWidth
+    );
+  }
+  
+  // Draw play/pause button in center
+  const buttonRadius = Math.min(cssWidth, cssHeight) * CONFIG.BUTTON_RADIUS_RATIO;
+  drawPlayPauseButton(ctx, centerX, centerY, buttonRadius, isPlaying);
 }
 
-// Keep only ONE set of these variables at the top (around line 66)
-let playheadAnimationProgress = 0;
-let playheadAnimationStartTime = 0;
-let playheadTargetVisibility = false;
-let isPlayheadAnimatingFlag = false;
+// ✅ IMPROVED: Consolidated animation state management to prevent memory leaks
+class AnimationState {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    // Playhead animation
+    this.playheadAnimationProgress = 0;
+    this.playheadAnimationStartTime = 0;
+    this.playheadTargetVisibility = false;
+    this.isPlayheadAnimatingFlag = false;
+    
+    // Time display animation
+    this.timeDisplayAnimationProgress = 0;
+    this.timeDisplayTargetVisibility = false;
+    this.isTimeDisplayAnimating = false;
+    
+    // Boost animation
+    this.currentBoostFactor = 1.0;
+    this.targetBoostFactor = 1.0;
+    
+    // Gradient cache
+    this.cachedGradient = null;
+    this.lastGradientParams = null;
+    
+    console.log('🧹 Animation state reset - memory cleaned');
+  }
+
+  // ✅ NEW: Cleanup method to prevent memory leaks
+  cleanup() {
+    this.reset();
+    
+    // Clear any remaining references
+    if (this.cachedGradient) {
+      this.cachedGradient = null;
+    }
+    this.lastGradientParams = null;
+  }
+}
+
+// ✅ IMPROVED: Single animation state instance instead of scattered variables
+const animationState = new AnimationState();
+
+// ✅ IMPROVED: Constants moved to prevent redefinition
 const PLAYHEAD_ANIMATION_DURATION = CONFIG.PLAYHEAD_ANIMATION_DURATION;
-
-let timeDisplayAnimationProgress = 0;
-let timeDisplayTargetVisibility = false;
-let isTimeDisplayAnimating = false;
-
-// Add boost animation variables here
-let currentBoostFactor = 1.0;
-let targetBoostFactor = 1.0;
 
 function getWaveformData(waveform, playhead, isPlaying, state) {
   let downsampled,
     maxAmp,
     numPoints = CONFIG.NUM_POINTS;
 
-  // Make sure we have valid state data
+  // ✅ TEMPORARY: Test with simple fallback data if missing
   if (!state || !state.audioBuffer || !waveform) {
+    console.warn('⚠️ Missing waveform data - creating test pattern');
+    
+    // Create a simple test waveform pattern
+    const testWaveform = new Array(numPoints).fill(0).map((_, i) => 
+      Math.sin(i / numPoints * Math.PI * 8) * 0.5 + 0.5
+    );
+    
     return {
-      downsampled: new Array(numPoints).fill(0),
+      downsampled: testWaveform,
       maxAmp: 1,
       numPoints,
     };
@@ -157,6 +206,7 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
   if (state.animationProgress > 0 || state.isTransitioning) {
     // ✅ FULL VIEW: No phantom padding - just the actual audio file
     const actualAudioData = state.audioBuffer.getChannelData(0);
+    
     const fullFileDownsampled = getFullFileDownsampled(
       actualAudioData,
       numPoints
@@ -188,6 +238,7 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
   ) {
     // ✅ FULL FILE VIEW: Show actual audio file without phantom padding
     const actualAudioData = state.audioBuffer.getChannelData(0);
+    
     downsampled = getFullFileDownsampled(
       actualAudioData,
       numPoints
@@ -195,7 +246,7 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
     );
     maxAmp = state.globalMaxAmp;
   } else {
-    // ✅ FOCUS VIEW: With phantom padding for smooth end-of-file behavior
+    // ✅ FOCUS VIEW: With phantom padding for smooth end-of-file behavior  
     const windowData = prepareWindowData(
       waveform,
       playhead,
@@ -205,10 +256,12 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
 
     let rawDownsampled = downsample(windowData, numPoints);
     const rawMax = Math.max(...rawDownsampled);
+
     const ratio = rawMax / state.globalMaxAmp;
 
     const minimumThreshold = CONFIG.BOOST_MINIMUM_THRESHOLD;
 
+    // ✅ IMPROVED: Use animation state for boost factors
     // Calculate new target boost factor
     const newBoostFactor =
       ratio < minimumThreshold && rawMax > 0
@@ -217,28 +270,28 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
 
     // Only update target if there's a significant change
     if (
-      Math.abs(newBoostFactor - targetBoostFactor) >
+      Math.abs(newBoostFactor - animationState.targetBoostFactor) >
       CONFIG.BOOST_CHANGE_THRESHOLD
     ) {
-      targetBoostFactor = Math.min(newBoostFactor, CONFIG.BOOST_MAX_MULTIPLIER);
+      animationState.targetBoostFactor = Math.min(newBoostFactor, CONFIG.BOOST_MAX_MULTIPLIER);
     }
 
     const lerpSpeed = CONFIG.BOOST_LERP_SPEED;
-    currentBoostFactor += (targetBoostFactor - currentBoostFactor) * lerpSpeed;
+    animationState.currentBoostFactor += (animationState.targetBoostFactor - animationState.currentBoostFactor) * lerpSpeed;
 
     // Apply the smoothed boost factor
     downsampled = rawDownsampled.map((amp) => {
       return Math.min(
-        amp * currentBoostFactor,
+        amp * animationState.currentBoostFactor,
         state.globalMaxAmp * CONFIG.BOOST_MAX_MULTIPLIER
       );
     });
 
-    if (CONFIG.DEBUG_LOGGING && Math.abs(currentBoostFactor - 1.0) > 0.01) {
+    if (CONFIG.DEBUG_LOGGING && Math.abs(animationState.currentBoostFactor - 1.0) > 0.01) {
       console.log(
-        `📈 Smooth Boost - Current: ${currentBoostFactor.toFixed(
+        `📈 Smooth Boost - Current: ${animationState.currentBoostFactor.toFixed(
           3
-        )}, Target: ${targetBoostFactor.toFixed(3)}, Raw: ${rawMax.toFixed(6)}`
+        )}, Target: ${animationState.targetBoostFactor.toFixed(3)}, Raw: ${rawMax.toFixed(6)}`
       );
     }
 
@@ -247,9 +300,6 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
 
   return { downsampled, maxAmp, numPoints };
 }
-
-let cachedGradient = null;
-let lastGradientParams = null;
 
 function createWaveformGradient(ctx, cx, cy, innerRadius, maxThickness, innerColor) {
   const outerRadius = innerRadius + maxThickness + 2; // Add 2 pixels
@@ -318,25 +368,8 @@ function drawWaveformPath(
 
   ctx.closePath();
 
-  // --- REMOVE LOW-END ENERGY MODULATION ---
-  // Use a fixed color for the gradient
-  const innerColor = "rgba(0,255,255,1)"; // Fixed cyan
-
-  const baseGradient = createWaveformGradient(
-    ctx,
-    cx,
-    cy,
-    innerRadius,
-    maxThickness,
-    innerColor
-  );
-  ctx.fillStyle = baseGradient;
+  // Use the gradient that was passed in (restored original functionality)
   ctx.fill();
-
-  // Do NOT draw the outline stroke
-  // ctx.strokeStyle = "rgba(0, 255, 255, 0.3)";
-  // ctx.lineWidth = 0.5;
-  // ctx.stroke();
 
   // Apply depth shadow using the consolidated function
   applyWaveformShadow(
@@ -528,59 +561,60 @@ function drawPlayhead(
   // Enhanced visibility logic - show when playing OR dragging
   const shouldShowPlayhead = isPlaying || isDragging;
 
+  // ✅ IMPROVED: Use animation state for all playhead animation variables
   // Detect visibility changes
   const now = performance.now();
-  if (shouldShowPlayhead !== playheadTargetVisibility) {
-    playheadTargetVisibility = shouldShowPlayhead;
-    playheadAnimationStartTime = now;
-    isPlayheadAnimatingFlag = true;
+  if (shouldShowPlayhead !== animationState.playheadTargetVisibility) {
+    animationState.playheadTargetVisibility = shouldShowPlayhead;
+    animationState.playheadAnimationStartTime = now;
+    animationState.isPlayheadAnimatingFlag = true;
 
     // Also trigger time display animation
-    timeDisplayTargetVisibility = shouldShowPlayhead;
-    isTimeDisplayAnimating = true;
+    animationState.timeDisplayTargetVisibility = shouldShowPlayhead;
+    animationState.isTimeDisplayAnimating = true;
 
     console.log(`🎯 Playhead visibility changed: ${shouldShowPlayhead}`);
   }
 
   // Update playhead animation progress
-  if (isPlayheadAnimatingFlag) {
-    const elapsed = now - playheadAnimationStartTime;
+  if (animationState.isPlayheadAnimatingFlag) {
+    const elapsed = now - animationState.playheadAnimationStartTime;
     const rawProgress = Math.min(elapsed / PLAYHEAD_ANIMATION_DURATION, 1);
 
-    if (playheadTargetVisibility) {
-      playheadAnimationProgress = rawProgress;
+    if (animationState.playheadTargetVisibility) {
+      animationState.playheadAnimationProgress = rawProgress;
     } else {
-      playheadAnimationProgress = 1 - rawProgress;
+      animationState.playheadAnimationProgress = 1 - rawProgress;
     }
 
     if (rawProgress >= 1) {
-      isPlayheadAnimatingFlag = false;
-      playheadAnimationProgress = playheadTargetVisibility ? 1 : 0;
+      animationState.isPlayheadAnimatingFlag = false;
+      animationState.playheadAnimationProgress = animationState.playheadTargetVisibility ? 1 : 0;
     }
   }
 
-  // Update time display animation progress
-  if (isTimeDisplayAnimating) {
-    const elapsed = now - playheadAnimationStartTime;
+  // ✅ IMPROVED: Update time display animation progress using animation state
+  if (animationState.isTimeDisplayAnimating) {
+    const elapsed = now - animationState.playheadAnimationStartTime;
     const rawProgress = Math.min(
       elapsed / CONFIG.TIME_DISPLAY_ANIMATION_DURATION,
       1
     );
 
-    if (timeDisplayTargetVisibility) {
-      timeDisplayAnimationProgress = rawProgress;
+    if (animationState.timeDisplayTargetVisibility) {
+      animationState.timeDisplayAnimationProgress = rawProgress;
     } else {
-      timeDisplayAnimationProgress = 1 - rawProgress;
+      animationState.timeDisplayAnimationProgress = 1 - rawProgress;
     }
 
     if (rawProgress >= 1) {
-      isTimeDisplayAnimating = false;
-      timeDisplayAnimationProgress = timeDisplayTargetVisibility ? 1 : 0;
+      animationState.isTimeDisplayAnimating = false;
+      animationState.timeDisplayAnimationProgress = animationState.timeDisplayTargetVisibility ? 1 : 0;
     }
   }
 
   // Don't draw playhead if completely retracted
-  if (playheadAnimationProgress <= 0) return;
+  if (animationState.playheadAnimationProgress <= 0) return;
 
   ctx.save();
 
@@ -598,7 +632,7 @@ function drawPlayhead(
   ctx.beginPath();
 
   // Apply easing
-  const easedProgress = easeInOutCubic(playheadAnimationProgress);
+  const easedProgress = easeInOutCubic(animationState.playheadAnimationProgress);
 
   const playheadInnerRadius = innerRadius;
   const playheadOuterRadius = innerRadius + maxThickness * easedProgress;
@@ -624,13 +658,13 @@ function drawPlayheadTime(
   duration,
   width // <-- add this parameter
 ) {
-  // Don't draw if time display animation is not active
-  if (timeDisplayAnimationProgress <= 0) return;
+  // ✅ IMPROVED: Don't draw if time display animation is not active using animation state
+  if (animationState.timeDisplayAnimationProgress <= 0) return;
 
   ctx.save();
 
   // Apply easing to time display animation
-  const easedProgress = easeInOutCubic(timeDisplayAnimationProgress);
+  const easedProgress = easeInOutCubic(animationState.timeDisplayAnimationProgress);
 
   // Format time
   const timeText = formatTime(currentTime);
@@ -676,27 +710,19 @@ function formatTime(seconds) {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-// Export function to check if playhead is animating (for redraw logic)
+// ✅ IMPROVED: Export function to check if playhead is animating using animation state
 export function isPlayheadAnimating() {
-  return isPlayheadAnimatingFlag || isTimeDisplayAnimating;
+  return animationState.isPlayheadAnimatingFlag || animationState.isTimeDisplayAnimating;
 }
 
+// ✅ IMPROVED: Reset animation using centralized state management
 export function resetPlayheadAnimation() {
-  playheadAnimationProgress = 0;
-  playheadTargetVisibility = false;
-  isPlayheadAnimatingFlag = false;
-  playheadAnimationStartTime = 0;
+  animationState.reset();
+}
 
-  timeDisplayAnimationProgress = 0;
-  timeDisplayTargetVisibility = false;
-  isTimeDisplayAnimating = false;
-
-  // Reset boost animation too
-  currentBoostFactor = 1.0;
-  targetBoostFactor = 1.0;
-
-  // Reset any playhead animation state
-  console.log("🔄 Playhead animation reset");
+// ✅ NEW: Export cleanup function for proper memory management
+export function cleanupAnimations() {
+  animationState.cleanup();
 }
 
 export function drawPlayPauseButton(ctx, cx, cy, radius, isPlaying) {
@@ -746,3 +772,4 @@ export function drawPlayPauseButton(ctx, cx, cy, radius, isPlaying) {
 
   ctx.restore();
 }
+

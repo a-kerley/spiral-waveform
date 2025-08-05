@@ -13,12 +13,31 @@ export function getAudioState() {
 }
 
 export function setAudioBuffer(buffer, waveform, maxAmp) {
+  console.log('🔧 setAudioBuffer called with:', {
+    hasBuffer: !!buffer,
+    bufferDuration: buffer ? buffer.duration : 'N/A',
+    bufferChannels: buffer ? buffer.numberOfChannels : 'N/A',
+    hasWaveform: !!waveform,
+    waveformLength: waveform ? waveform.length : 0,
+    waveformConstructor: waveform ? waveform.constructor.name : 'N/A',
+    maxAmp,
+    maxAmpType: typeof maxAmp
+  });
+  
   audioState.audioBuffer = buffer;
   audioState.waveform = waveform;
   audioState.globalMaxAmp = maxAmp;
   audioState.duration = buffer ? buffer.duration : 0;
   audioState.currentPlayhead = 0;
   audioState.isPlaying = false;
+  
+  console.log('✅ Audio state updated:', {
+    hasAudioBuffer: !!audioState.audioBuffer,
+    hasWaveform: !!audioState.waveform,
+    waveformLength: audioState.waveform ? audioState.waveform.length : 0,
+    globalMaxAmp: audioState.globalMaxAmp,
+    duration: audioState.duration
+  });
 }
 
 export function setPlayhead(time) {

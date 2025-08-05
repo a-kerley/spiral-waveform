@@ -7,10 +7,12 @@
     <link rel="stylesheet" href="css/styles.css">
   </head>
   <body>
-    <div class="container">
-      <!-- Let JavaScript create everything -->
-    </div>
-    
-    <script type="module" src="js/main.js"></script>
+    <div class="container" id="spiral-player-container"></div>
+    <script type="module">
+      import { SpiralWaveformPlayer } from './js/spiral-waveform-player.js';
+      // Instantiate the player component and attach to the container
+      const container = document.getElementById('spiral-player-container');
+      new SpiralWaveformPlayer({ container });
+    </script>
   </body>
 </html>
