@@ -223,6 +223,12 @@ async function ensureAudioContextRunning() {
 }
 
 export async function loadAudioForPlayback(audioBuffer) {
+  // ✅ NEW: Skip buffer loading for URL audio - use HTML audio element instead
+  if (window.urlAudioElement) {
+    console.log('🎵 URL audio element ready for playback');
+    return;
+  }
+  
   // ✅ IMPROVED: Better validation and error handling
   if (!audioBuffer) {
     throw new Error('No audio buffer provided');
@@ -247,6 +253,11 @@ export async function loadAudioForPlayback(audioBuffer) {
 }
 
 export async function playAudio(startTimeSeconds = 0) {
+  // Check if we have URL-loaded audio element
+  if (window.urlAudioElement) {
+    return playUrlAudio(startTimeSeconds);
+  }
+  
   // ✅ IMPROVED: Better validation and error handling
   if (!isInitialized || !window.currentAudioBuffer) {
     console.warn('Audio not initialized or no buffer loaded');
@@ -299,7 +310,61 @@ export async function playAudio(startTimeSeconds = 0) {
   }
 }
 
+// ✅ NEW: Handle URL audio playback (MediaElement approach like WaveSurfer)
+async function playUrlAudio(startTimeSeconds = 0) {
+  try {
+    const audio = window.urlAudioElement;
+    if (!audio) {
+      console.warn('No URL audio element available');
+      return false;
+    }
+    
+    console.log('🎵 URL audio element state:', {
+      src: audio.src,
+      duration: audio.duration,
+      currentTime: audio.currentTime,
+      paused: audio.paused,
+      readyState: audio.readyState,
+      networkState: audio.networkState
+    });
+    
+    // Validate start time
+    if (startTimeSeconds < 0) {
+      startTimeSeconds = 0;
+    }
+    
+    if (startTimeSeconds > audio.duration) {
+      console.warn(`Start time ${startTimeSeconds}s exceeds audio duration ${audio.duration}s`);
+      startTimeSeconds = 0;
+    }
+    
+    // Set current time and play
+    audio.currentTime = startTimeSeconds;
+    
+    console.log('🎵 Attempting to play URL audio...');
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      await playPromise;
+    }
+    
+    console.log(`▶️ Playing URL audio from ${startTimeSeconds.toFixed(2)}s`);
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Failed to play URL audio:', error);
+    return false;
+  }
+}
+
 export function pauseAudio() {
+  // Handle URL audio
+  if (window.urlAudioElement) {
+    window.urlAudioElement.pause();
+    console.log(`⏸️ URL audio paused at ${window.urlAudioElement.currentTime.toFixed(2)}s`);
+    return;
+  }
+  
+  // Handle buffer audio
   if (audioSource) {
     const currentTime = getCurrentTime();
     audioSource.stop();
@@ -316,6 +381,15 @@ export function stopAudio() {
     scrubState.reset();
   }
 
+  // Handle URL audio
+  if (window.urlAudioElement) {
+    window.urlAudioElement.pause();
+    window.urlAudioElement.currentTime = 0;
+    console.log('🛑 URL audio stopped');
+    return;
+  }
+
+  // Handle buffer audio
   if (audioSource) {
     try {
       audioSource.stop();
@@ -349,12 +423,21 @@ export function startScrubbing(position) {
   
   position = Math.max(0, Math.min(1, position));
   
-  if (!isInitialized || !window.currentAudioBuffer) {
-    console.warn('⚠️ Cannot start scrubbing - audio not initialized');
+  // ✅ NEW: Check for either buffer audio OR URL audio
+  const hasBufferAudio = isInitialized && window.currentAudioBuffer;
+  const hasUrlAudio = window.urlAudioElement;
+  
+  if (!hasBufferAudio && !hasUrlAudio) {
+    console.warn('⚠️ Cannot start scrubbing - no audio loaded');
     return false;
   }
   
-  // ✅ IMPROVED: Check audioContext availability
+  // Handle URL audio scrubbing differently
+  if (hasUrlAudio && !hasBufferAudio) {
+    return startUrlScrubbing(position);
+  }
+  
+  // ✅ IMPROVED: Check audioContext availability for buffer audio
   if (!audioContext || audioContext.state === 'closed') {
     console.warn('⚠️ Cannot start scrubbing - audio context not available');
     return false;
@@ -414,6 +497,39 @@ export function startScrubbing(position) {
   return wasPlaying;
 }
 
+// ✅ NEW: Handle URL audio scrubbing (simplified approach)
+function startUrlScrubbing(position) {
+  try {
+    const audioElement = window.urlAudioElement;
+    if (!audioElement || !audioElement.duration) {
+      console.warn('⚠️ Cannot scrub URL audio - no duration available');
+      return false;
+    }
+    
+    const wasPlaying = !audioElement.paused;
+    const targetTime = position * audioElement.duration;
+    
+    // For URL audio, we'll use a simplified scrubbing approach
+    // Just set the time directly and track the state
+    audioElement.currentTime = targetTime;
+    
+    // Use the same scrub state system for consistency
+    scrubState.startScrubbing(position, wasPlaying);
+    
+    audio('Started URL audio scrubbing', 'debug', {
+      position,
+      targetTime: targetTime.toFixed(3),
+      wasPlaying
+    });
+    
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Failed to start URL audio scrubbing:', error);
+    return false;
+  }
+}
+
 // ✅ IMPROVED: Scrubbing update with state validation
 export function updateScrubbing(velocity, position) {
   // ✅ NEW: Validate inputs
@@ -426,7 +542,12 @@ export function updateScrubbing(velocity, position) {
     return false;
   }
   
-  // ✅ IMPROVED: Check audioContext availability
+  // Handle URL audio scrubbing
+  if (window.urlAudioElement) {
+    return updateUrlScrubbing(position);
+  }
+  
+  // ✅ IMPROVED: Check audioContext availability for buffer audio
   if (!audioContext || audioContext.state === 'closed') {
     console.warn('⚠️ Cannot update scrubbing - audio context not available');
     return false;
@@ -473,12 +594,39 @@ export function updateScrubbing(velocity, position) {
   return true;
 }
 
+// ✅ NEW: Handle URL audio scrubbing updates
+function updateUrlScrubbing(position) {
+  try {
+    const audioElement = window.urlAudioElement;
+    if (!audioElement || !audioElement.duration) {
+      return false;
+    }
+    
+    const targetTime = position * audioElement.duration;
+    audioElement.currentTime = targetTime;
+    
+    // Update scrub state
+    scrubState.updateScrubbing(position);
+    
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Failed to update URL audio scrubbing:', error);
+    return false;
+  }
+}
+
 // ✅ IMPROVED: Stop scrubbing with comprehensive state management
 export function stopScrubbing(finalPosition, shouldResumePlaying = null) {
   // ✅ NEW: Validate final position
   if (typeof finalPosition !== 'number' || !isFinite(finalPosition)) {
     console.warn('⚠️ Invalid final position for stopScrubbing, using current state');
     finalPosition = scrubState.getState().currentPosition;
+  }
+  
+  // Handle URL audio scrubbing
+  if (window.urlAudioElement) {
+    return stopUrlScrubbing(finalPosition, shouldResumePlaying);
   }
   
   // ✅ IMPROVED: Use centralized state management
@@ -538,7 +686,49 @@ export function getScrubState() {
   return scrubState.getState();
 }
 
+// ✅ NEW: Handle URL audio scrubbing stop
+function stopUrlScrubbing(finalPosition, shouldResumePlaying = null) {
+  try {
+    const audioElement = window.urlAudioElement;
+    if (!audioElement) {
+      return { finalPosition: 0, shouldResume: false };
+    }
+    
+    // Get scrub state before resetting
+    const scrubResult = scrubState.stopScrubbing(finalPosition, shouldResumePlaying);
+    
+    // Set final position
+    const targetTime = finalPosition * audioElement.duration;
+    audioElement.currentTime = targetTime;
+    
+    // Resume playback if needed
+    if (scrubResult.shouldResume) {
+      audioElement.play().catch(error => {
+        console.error('❌ Failed to resume URL audio after scrubbing:', error);
+      });
+    }
+    
+    audio('Stopped URL audio scrubbing', 'debug', {
+      finalPosition,
+      targetTime: targetTime.toFixed(3),
+      shouldResume: scrubResult.shouldResume
+    });
+    
+    return scrubResult;
+    
+  } catch (error) {
+    console.error('❌ Failed to stop URL audio scrubbing:', error);
+    return { finalPosition: 0, shouldResume: false };
+  }
+}
+
 export function getCurrentTime() {
+  // Handle URL audio
+  if (window.urlAudioElement) {
+    return window.urlAudioElement.currentTime || 0;
+  }
+  
+  // Handle buffer audio
   if (!audioSource || !audioSource.buffer || !startTime) {
     const fallbackTime = pauseTime || 0;
     return fallbackTime;
@@ -551,6 +741,12 @@ export function getCurrentTime() {
 }
 
 export function isAudioPlaying() {
+  // Handle URL audio
+  if (window.urlAudioElement) {
+    return !window.urlAudioElement.paused;
+  }
+  
+  // Handle buffer audio
   return audioSource !== null && startTime > 0;
 }
 
@@ -561,6 +757,15 @@ export function seekTo(timeSeconds) {
     return;
   }
   
+  // Handle URL audio
+  if (window.urlAudioElement) {
+    const wasPlaying = !window.urlAudioElement.paused;
+    window.urlAudioElement.currentTime = timeSeconds;
+    // No need to restart playback for URL audio - it continues playing
+    return;
+  }
+  
+  // Handle buffer audio
   const wasPlaying = isAudioPlaying();
   
   if (wasPlaying) {
@@ -573,6 +778,12 @@ export function seekTo(timeSeconds) {
 }
 
 export function setVolume(volume) {
+  // Handle URL audio
+  if (window.urlAudioElement) {
+    window.urlAudioElement.volume = Math.max(0, Math.min(1, volume));
+  }
+  
+  // Handle buffer audio
   if (gainNode) {
     gainNode.gain.value = Math.max(0, Math.min(1, volume));
   }

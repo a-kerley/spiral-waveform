@@ -27,7 +27,14 @@ export function setAudioBuffer(buffer, waveform, maxAmp) {
   audioState.audioBuffer = buffer;
   audioState.waveform = waveform;
   audioState.globalMaxAmp = maxAmp;
-  audioState.duration = buffer ? buffer.duration : 0;
+  
+  // For URL-loaded audio, use the HTML audio element duration if available
+  if (window.urlAudioElement && window.urlAudioElement.duration) {
+    audioState.duration = window.urlAudioElement.duration;
+  } else {
+    audioState.duration = buffer ? buffer.duration : 0;
+  }
+  
   audioState.currentPlayhead = 0;
   audioState.isPlaying = false;
   
@@ -36,7 +43,8 @@ export function setAudioBuffer(buffer, waveform, maxAmp) {
     hasWaveform: !!audioState.waveform,
     waveformLength: audioState.waveform ? audioState.waveform.length : 0,
     globalMaxAmp: audioState.globalMaxAmp,
-    duration: audioState.duration
+    duration: audioState.duration,
+    isUrlAudio: !!window.urlAudioElement
   });
 }
 
