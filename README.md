@@ -72,21 +72,32 @@ Currently undergoing Phase 1 refactoring (Foundation & Cleanup). See [REFACTORIN
 
 ## Architecture
 
-The player is built using vanilla JavaScript with ES6 modules:
+The player is built using vanilla JavaScript with ES6 modules. See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed design documentation.
 
-**Core Components:**
-- `spiral-waveform-player.js` - Main player class
-- `audio-playback.js` - Web Audio API management
-- `waveform-draw.js` - Canvas rendering
+**Module Ownership:**
+
+Core Audio:
+- `audio-loader.js` - Audio file/URL loading, format detection, waveform extraction
+- `waveform-data.js` - Waveform downsampling, caching, placeholder generation
+- `audio-playback.js` - Low-level WebAudio playback lifecycle
+- `audio-controls.js` - High-level playback API with validation
+
+Rendering:
+- `waveform-draw.js` - Canvas rendering and radial visualization
+- `canvas-math.js` - Geometric helpers (polar/cartesian)
 - `animation.js` - Animation loop and transitions
+
+Player & UI:
+- `spiral-waveform-player.js` - Main player component, orchestrates UI
+- `ui-controls.js` - UI creation and keyboard controls
+- `file-handler.js` - File input handling
 - `interaction.js` - Mouse/touch event handling
 
-**Supporting Modules:**
-- `audio-state.js` - Centralized audio state
-- `canvas-setup.js` - Canvas initialization
+State & Utilities:
+- `state-manager.js` - Centralized application state
 - `validation.js` - Type validation system
 - `logger.js` - Development logging
-- `utils.js` - Shared utilities
+- `utils.js` - Pure utility functions
 
 ## Development
 

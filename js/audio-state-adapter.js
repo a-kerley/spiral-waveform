@@ -68,15 +68,6 @@ export function setAudioBuffer(buffer, waveform, maxAmp) {
   
   // Batch update to avoid multiple notifications
   stateManager.batch(updates);
-  
-  console.log('✅ Audio state updated:', {
-    hasAudioBuffer: !!stateManager.get('audio.buffer'),
-    hasWaveform: !!stateManager.get('audio.waveform'),
-    waveformLength: stateManager.get('audio.waveform')?.length || 0,
-    globalMaxAmp: stateManager.get('audio.maxAmplitude'),
-    duration: stateManager.get('audio.duration'),
-    isUrlAudio: !!window.urlAudioElement
-  });
 }
 
 /**
@@ -94,7 +85,9 @@ export function setPlayhead(time) {
  * @param {boolean} playing - Whether audio is playing
  */
 export function setPlayingState(playing) {
+  console.log('🔧 setPlayingState called with:', playing);
   stateManager.set('audio.isPlaying', playing);
+  console.log('✅ StateManager updated, new value:', stateManager.get('audio.isPlaying'));
 }
 
 /**
@@ -110,8 +103,6 @@ export function resetAudioState() {
     'audio.isPlaying': false,
     'audio.duration': 0
   });
-  
-  console.log('🔄 Audio state reset to defaults');
 }
 
 /**
@@ -149,21 +140,16 @@ export function disposeAudioState() {
 export async function initializeAudioStateSubscriptions() {
   // Skip in test/Node environment
   if (typeof window === 'undefined' || typeof process !== 'undefined') {
-    console.log('⏭️ Skipping audio state subscriptions (not in browser environment)');
     return;
   }
-  
-  console.log('🔄 Initializing audio state subscriptions...');
   
   try {
     // Dynamically import render-state to avoid circular dependencies
     const { renderState, RenderComponents } = await import('./render-state.js');
-    console.log('📦 render-state module loaded successfully');
     
     // Subscribe to playhead changes
     stateManager.subscribe('audio.currentTime', (newTime, oldTime) => {
       if (Math.abs(newTime - oldTime) > 0.001) {
-        console.log('⏱️ Playhead changed, marking dirty');
         renderState.markDirty(RenderComponents.PLAYHEAD);
         renderState.markDirty(RenderComponents.TIME_DISPLAY);
       }
@@ -172,6 +158,8 @@ export async function initializeAudioStateSubscriptions() {
     // Subscribe to playing state changes
     stateManager.subscribe('audio.isPlaying', (isPlaying) => {
       console.log('▶️ Playing state changed:', isPlaying);
+      // ✅ FIX: Mark PLAYHEAD dirty because play button is drawn in playhead layer
+      renderState.markDirty(RenderComponents.PLAYHEAD);
       renderState.markDirty(RenderComponents.PLAY_BUTTON);
       renderState.markDirty(RenderComponents.UI);
     });
@@ -192,8 +180,6 @@ export async function initializeAudioStateSubscriptions() {
         renderState.markDirty(RenderComponents.FULL);
       }
     });
-    
-    console.log('✅ Audio state subscriptions initialized');
   } catch (err) {
     console.error('❌ Failed to initialize audio state subscriptions:', err);
   }

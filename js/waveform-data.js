@@ -306,3 +306,86 @@ export function prepareWindowData(waveform, playhead, actualDuration, sampleRate
     }
   }
 }
+
+/**
+ * Generate a realistic placeholder waveform with configurable length
+ * This creates synthetic audio data that resembles real music with bass, mids, highs,
+ * beat patterns, and dynamic variations
+ * 
+ * @param {number} targetSamples - Number of samples to generate (default: 2000 for visualization)
+ * @param {number} sampleRate - Sample rate in Hz (default: 44100)
+ * @param {number} duration - Duration in seconds (optional, calculated from targetSamples if not provided)
+ * @returns {Float32Array} Generated waveform data
+ */
+export function generatePlaceholderWaveform(targetSamples = 2000, sampleRate = 44100, duration = null) {
+  try {
+    // Validate inputs
+    if (typeof targetSamples !== 'number' || targetSamples <= 0 || !isFinite(targetSamples)) {
+      console.warn('⚠️ Invalid targetSamples, using default 2000');
+      targetSamples = 2000;
+    }
+    
+    if (typeof sampleRate !== 'number' || sampleRate <= 0 || !isFinite(sampleRate)) {
+      console.warn('⚠️ Invalid sampleRate, using default 44100');
+      sampleRate = 44100;
+    }
+    
+    // Calculate duration if not provided
+    if (duration === null || typeof duration !== 'number' || duration <= 0) {
+      duration = targetSamples / sampleRate;
+    }
+    
+    const waveform = new Float32Array(targetSamples);
+    
+    for (let i = 0; i < targetSamples; i++) {
+      const time = (i / targetSamples) * duration;
+      
+      // Create multiple frequency components like real music
+      let sample = 0;
+      
+      // Bass frequencies (20-250 Hz)
+      sample += Math.sin(time * 60 * Math.PI * 2) * 0.4 * Math.random();
+      sample += Math.sin(time * 120 * Math.PI * 2) * 0.3 * Math.random();
+      
+      // Mid frequencies (250-4000 Hz) 
+      sample += Math.sin(time * 440 * Math.PI * 2) * 0.2 * Math.random();
+      sample += Math.sin(time * 880 * Math.PI * 2) * 0.15 * Math.random();
+      sample += Math.sin(time * 1760 * Math.PI * 2) * 0.1 * Math.random();
+      
+      // High frequencies (4000+ Hz)
+      sample += Math.sin(time * 3520 * Math.PI * 2) * 0.05 * Math.random();
+      
+      // Add musical structure (verses, chorus, etc.)
+      const sectionTime = time % 30; // 30-second sections
+      const sectionEnvelope = Math.sin(sectionTime / 30 * Math.PI) * 0.8 + 0.2;
+      
+      // Add beat patterns (4/4 time at ~120 BPM)
+      const beatTime = (time * 2) % 1; // 2 beats per second = 120 BPM
+      const beatEnvelope = Math.pow(Math.sin(beatTime * Math.PI), 0.3);
+      
+      // Combine with realistic amplitude variations
+      const dynamicRange = 0.3 + 0.7 * Math.sin(time * 0.1) * Math.sin(time * 0.03);
+      
+      // Apply envelopes and normalize
+      sample = sample * sectionEnvelope * beatEnvelope * dynamicRange;
+      
+      // Add some noise for realism
+      sample += (Math.random() - 0.5) * 0.02;
+      
+      // Clamp to reasonable range
+      waveform[i] = Math.max(-0.8, Math.min(0.8, sample));
+    }
+    
+    audio('Generated placeholder waveform', 'info', { 
+      samples: targetSamples, 
+      duration: duration.toFixed(2) + 's',
+      sampleRate 
+    });
+    
+    return waveform;
+  } catch (error) {
+    system('Error generating placeholder waveform', 'error', error);
+    // Return silence on error
+    return new Float32Array(Math.max(0, targetSamples || 2000));
+  }
+}

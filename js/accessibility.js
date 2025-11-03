@@ -158,36 +158,42 @@ export class KeyboardNavigationManager {
         case 'k':
           // Space or K: Play/Pause
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.togglePlayPause?.();
           break;
 
         case 'ArrowLeft':
           // Left arrow: Seek backward 5s
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.seekBackward?.(5);
           break;
 
         case 'ArrowRight':
           // Right arrow: Seek forward 5s
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.seekForward?.(5);
           break;
 
         case 'ArrowUp':
           // Up arrow: Volume up
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.volumeUp?.(0.1);
           break;
 
         case 'ArrowDown':
           // Down arrow: Volume down
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.volumeDown?.(0.1);
           break;
 
         case 'm':
           // M: Mute/unmute
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.toggleMute?.();
           break;
 
@@ -195,18 +201,21 @@ export class KeyboardNavigationManager {
         case 'Home':
           // 0 or Home: Jump to start
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.seekTo?.(0);
           break;
 
         case 'End':
           // End: Jump to end
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.seekToEnd?.();
           break;
 
         case 'f':
           // F: Toggle fullscreen (if supported)
           e.preventDefault();
+          e.stopPropagation(); // ✅ FIX: Prevent multiple handlers from firing
           this.callbacks?.toggleFullscreen?.();
           break;
       }

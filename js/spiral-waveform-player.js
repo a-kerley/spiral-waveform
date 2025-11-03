@@ -1,6 +1,8 @@
-import { initializeAudio, loadAudioForPlayback, playAudio, pauseAudio, seekTo, getCurrentTime, isAudioPlaying, isScrubbingActive, setVolume, cleanupAudio } from './audio-playback.js';
-import { getAudioState, setAudioBuffer, setPlayhead, setPlayingState, resetAudioState } from './audio-state.js';
-import { handleFileSelect } from './audio-loader.js';
+import { initializeAudio, loadAudioForPlayback, cleanupAudio, isScrubbingActive } from './audio-playback.js';
+import { togglePlayPause as audioTogglePlayPause, seekToPosition as audioSeekToPosition, seekRelative as audioSeekRelative, setVolume as audioSetVolume, updatePlayheadFromAudio } from './audio-controls.js';
+import { getAudioState, setAudioBuffer, resetAudioState } from './audio-state.js';
+import { loadAudioFromUrl } from './audio-loader.js';
+import { generatePlaceholderWaveform } from './waveform-data.js';
 import { createUI, setupKeyboardControls } from './ui-controls.js';
 import { setupFileInput, handleFileLoad } from './file-handler.js';
 import { initializeCanvas, setupResponsiveCanvas } from './canvas-setup.js';
@@ -8,10 +10,8 @@ import { setupInteraction } from './interaction.js';
 import { createAnimationLoop } from './animation.js';
 import { drawRadialWaveform, drawPlayPauseButton, resetPlayheadAnimation, layerManager } from './waveform-draw.js';
 import { CONFIG } from './utils.js';
-import { updatePlayheadFromAudio } from './audio-controls.js';
-import { AudioUrlUtils, toDirectUrl, sanitizeUrl } from './audio-url-utils.js';
-import { showError, showLoading, hideLoading } from './error-ui.js';
-import { AudioContextManager, createAudioBuffer, decodeAudioData } from './audio-context-manager.js';
+import { showError, hideLoading } from './error-ui.js';
+import { createAudioBuffer } from './audio-context-manager.js';
 import { SettingsManager, loadSettings, updateSetting } from './settings-manager.js';
 import { enablePerformanceMonitoring, printPerformanceReport, performanceMonitor } from './performance-monitor.js';
 import { performanceOverlay } from './performance-overlay.js';
@@ -19,369 +19,51 @@ import { screenReaderAnnouncer, KeyboardNavigationManager, AriaManager } from '.
 import logger, { system, audio as audioLog, ui, file as fileLog } from './logger.js';
 
 export class SpiralWaveformPlayer {
-  // ✅ NEW: Generate realistic placeholder waveform
-  _generateRealisticWaveform(channelData, sampleRate) {
-    const length = channelData.length;
-    
-    for (let i = 0; i < length; i++) {
-      const time = i / sampleRate;
-      
-      // Create multiple frequency components like real music
-      let sample = 0;
-      
-      // Bass frequencies (20-250 Hz)
-      sample += Math.sin(time * 60 * Math.PI * 2) * 0.4 * Math.random();
-      sample += Math.sin(time * 120 * Math.PI * 2) * 0.3 * Math.random();
-      
-      // Mid frequencies (250-4000 Hz) 
-      sample += Math.sin(time * 440 * Math.PI * 2) * 0.2 * Math.random();
-      sample += Math.sin(time * 880 * Math.PI * 2) * 0.15 * Math.random();
-      sample += Math.sin(time * 1760 * Math.PI * 2) * 0.1 * Math.random();
-      
-      // High frequencies (4000+ Hz)
-      sample += Math.sin(time * 3520 * Math.PI * 2) * 0.05 * Math.random();
-      
-      // Add musical structure (verses, chorus, etc.)
-      const sectionTime = time % 30; // 30-second sections
-      const sectionEnvelope = Math.sin(sectionTime / 30 * Math.PI) * 0.8 + 0.2;
-      
-      // Add beat patterns (4/4 time at ~120 BPM)
-      const beatTime = (time * 2) % 1; // 2 beats per second = 120 BPM
-      const beatEnvelope = Math.pow(Math.sin(beatTime * Math.PI), 0.3);
-      
-      // Combine with realistic amplitude variations
-      const dynamicRange = 0.3 + 0.7 * Math.sin(time * 0.1) * Math.sin(time * 0.03);
-      
-      // Apply envelopes and normalize
-      sample = sample * sectionEnvelope * beatEnvelope * dynamicRange;
-      
-      // Add some noise for realism
-      sample += (Math.random() - 0.5) * 0.02;
-      
-      // Clamp to reasonable range
-      channelData[i] = Math.max(-0.8, Math.min(0.8, sample));
-    }
-  }
-
-  // Load audio from a URL (supports direct links, Dropbox, etc.)
+  /**
+   * Load audio from a URL (supports direct links, Dropbox, etc.)
+   * Delegates to audio-loader.js and handles placeholder waveform generation if needed
+   */
   async loadFromUrl(url) {
     try {
-      fileLog('🔗 Player: Loading from URL', 'info', { url: url.substring(0, 100) });
+      // Use centralized loader
+      const loaderResult = await loadAudioFromUrl(url);
       
-      // Dispose of previous audio to free memory
-      const { disposeAudio } = await import('./memory-manager.js');
-      await disposeAudio();
+      // Store audio element on instance (not global)
+      this._urlAudioElement = loaderResult.audioElement;
       
-      // Sanitize and validate URL
-      const sanitizedUrl = sanitizeUrl(url);
-      const urlType = AudioUrlUtils.detectUrlType(sanitizedUrl);
+      // If waveform is null, need to generate placeholder
+      let waveform = loaderResult.waveform;
+      let audioBuffer = loaderResult.audioBuffer;
       
-      fileLog('� Player: URL type detected', 'info', { type: AudioUrlUtils.describeUrl(sanitizedUrl) });
-      
-      // Convert sharing URLs to direct download URLs
-      const directUrl = toDirectUrl(sanitizedUrl);
-      
-      if (directUrl !== sanitizedUrl) {
-        fileLog('🔄 Player: Converted to direct URL');
+      if (!waveform) {
+        // Generate placeholder waveform
+        const duration = loaderResult.duration || 30;
+        const sampleRate = 44100;
+        const length = Math.floor(duration * sampleRate);
+        
+        audioBuffer = createAudioBuffer(1, length, sampleRate);
+        const channelData = audioBuffer.getChannelData(0);
+        
+        // Use centralized placeholder generator
+        const placeholderWaveform = generatePlaceholderWaveform(length, sampleRate, duration);
+        channelData.set(placeholderWaveform);
+        waveform = channelData;
+        
+        fileLog('� Player: Generated placeholder waveform', 'info', { samples: length, duration });
       }
-
-      fileLog('🌐 Player: Fetching audio from URL');
       
-      // Show loading state
-      showLoading('Loading audio from URL...');
+      // Create result object for visualization
+      const result = {
+        audioBuffer,
+        waveform,
+        globalMaxAmp: loaderResult.globalMaxAmp || 0.7,
+        isUrlLoaded: true
+      };
       
-      // WaveSurfer approach: Use HTML audio element for MediaElement backend
-      return new Promise((resolve, reject) => {
-        const audio = document.createElement('audio');
-        audio.style.display = 'none';
-        audio.preload = 'metadata';
-        
-        // Guard to prevent multiple waveform extractions
-        let waveformExtracted = false;
-        
-        // Try setting crossOrigin for better compatibility, but don't require it
-        try {
-          audio.crossOrigin = 'anonymous';
-        } catch (e) {
-          console.log('⚠️ CrossOrigin not supported, continuing without it');
-        }
-        
-        audio.oncanplaythrough = async () => {
-          // Only extract waveform once
-          if (waveformExtracted) {
-            return;
-          }
-          waveformExtracted = true;
-          try {
-            console.log('✅ Audio metadata loaded, duration:', audio.duration);
-            
-            // Now try to extract real waveform data using Web Audio API
-            await AudioContextManager.resume();
-            
-            console.log('🎵 Attempting to extract real waveform from URL audio...');
-            
-            try {
-              // For real waveform extraction, we need to use fetch to get the raw audio data
-              // We'll avoid creating MediaElementSource to keep HTML audio playback simple
-              console.log('🌐 Fetching audio data for waveform analysis...');
-              
-              const response = await fetch(directUrl);
-              if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-              }
-              
-              const arrayBuffer = await response.arrayBuffer();
-              console.log('📊 Audio data fetched, size:', arrayBuffer.byteLength);
-              
-              // Decode the audio data
-              const audioBuffer = await decodeAudioData(arrayBuffer);
-              console.log('🎵 Audio decoded successfully:', {
-                duration: audioBuffer.duration,
-                channels: audioBuffer.numberOfChannels,
-                sampleRate: audioBuffer.sampleRate,
-                length: audioBuffer.length
-              });
-              
-              // Extract real waveform data
-              const channelData = audioBuffer.getChannelData(0);
-              const realWaveform = new Float32Array(channelData);
-              
-              // Calculate real max amplitude
-              let maxAmp = 0;
-              for (let i = 0; i < realWaveform.length; i++) {
-                maxAmp = Math.max(maxAmp, Math.abs(realWaveform[i]));
-              }
-              
-              console.log('✅ Real waveform extracted:', {
-                samples: realWaveform.length,
-                maxAmplitude: maxAmp,
-                duration: audioBuffer.duration
-              });
-              
-              // Store the HTML audio element for actual playback (keep it simple)
-              this._urlAudioElement = audio;
-              
-              // Create result object with REAL waveform data
-              const result = {
-                audioBuffer: audioBuffer,
-                waveform: realWaveform,
-                globalMaxAmp: maxAmp,
-                isUrlLoaded: true
-              };
-              
-              // Use existing file loading system for visualization
-              await this._onFileLoaded(result);
-              
-              console.log('🎉 Successfully loaded URL audio with REAL waveform data!');
-              hideLoading();
-              resolve();
-              
-            } catch (webAudioError) {
-              console.warn('⚠️ Could not extract real waveform, falling back to placeholder:', webAudioError.message);
-              
-              // Fallback to placeholder waveform if Web Audio extraction fails
-              const duration = audio.duration || 30;
-              const sampleRate = 44100;
-              const length = Math.floor(duration * sampleRate);
-              
-              const audioBuffer = createAudioBuffer(1, length, sampleRate);
-              const channelData = audioBuffer.getChannelData(0);
-              
-              // Generate realistic waveform using shared function
-              this._generateRealisticWaveform(channelData, sampleRate);
-              
-              // Store the HTML audio element for actual playback
-              this._urlAudioElement = audio;
-              
-              // Create result object for visualization
-              const result = {
-                audioBuffer: audioBuffer,
-                waveform: channelData,
-                globalMaxAmp: 0.7,
-                isUrlLoaded: true
-              };
-              
-              await this._onFileLoaded(result);
-              console.log('✅ Successfully loaded audio from URL with placeholder waveform');
-              hideLoading();
-              resolve();
-            }
-            
-          } catch (error) {
-            console.error('❌ Error processing URL audio:', error);
-            reject(error);
-          }
-        };
-        
-        audio.onerror = (event) => {
-          console.error('❌ Audio loading error:', event);
-          console.log('🔄 Trying fallback approach without crossOrigin...');
-          
-          // Try fallback without crossOrigin
-          const fallbackAudio = document.createElement('audio');
-          fallbackAudio.style.display = 'none';
-          fallbackAudio.preload = 'metadata';
-          // Don't set crossOrigin for fallback
-          
-          fallbackAudio.oncanplaythrough = async () => {
-            try {
-              console.log('✅ Fallback audio metadata loaded, duration:', fallbackAudio.duration);
-              
-              // Try to extract real waveform from fallback audio too
-              try {
-                console.log('🎵 Attempting real waveform extraction with fallback method...');
-                
-                const response = await fetch(directUrl);
-                const arrayBuffer = await response.arrayBuffer();
-                const audioBuffer = await decodeAudioData(arrayBuffer);
-                
-                const channelData = audioBuffer.getChannelData(0);
-                const realWaveform = new Float32Array(channelData);
-                
-                let maxAmp = 0;
-                for (let i = 0; i < realWaveform.length; i++) {
-                  maxAmp = Math.max(maxAmp, Math.abs(realWaveform[i]));
-                }
-                
-                this._urlAudioElement = fallbackAudio;
-                
-                const result = {
-                  audioBuffer: audioBuffer,
-                  waveform: realWaveform,
-                  globalMaxAmp: maxAmp,
-                  isUrlLoaded: true
-                };
-                
-                await this._onFileLoaded(result);
-                console.log('🎉 Fallback method extracted REAL waveform!');
-                hideLoading();
-                resolve();
-                return;
-                
-              } catch (realWaveformError) {
-                console.warn('⚠️ Fallback real waveform extraction failed, using placeholder:', realWaveformError.message);
-              }
-              
-              // Fallback to placeholder if real extraction fails
-              const duration = fallbackAudio.duration || 30;
-              const sampleRate = 44100;
-              const length = Math.floor(duration * sampleRate);
-              
-              const audioBuffer = createAudioBuffer(1, length, sampleRate);
-              const channelData = audioBuffer.getChannelData(0);
-              
-              // Generate realistic waveform using shared function
-              this._generateRealisticWaveform(channelData, sampleRate);
-              
-              // Store fallback audio element
-              this._urlAudioElement = fallbackAudio;
-              
-              const result = {
-                audioBuffer: audioBuffer,
-                waveform: channelData,
-                globalMaxAmp: 0.7,
-                isUrlLoaded: true
-              };
-              
-              await this._onFileLoaded(result);
-              console.log('✅ Successfully loaded audio from URL with fallback method');
-              hideLoading();
-              resolve();
-              
-            } catch (error) {
-              console.error('❌ Fallback also failed:', error);
-              reject(error);
-            }
-          };
-          
-          fallbackAudio.onerror = (fallbackEvent) => {
-            console.error('❌ Fallback audio loading also failed:', fallbackEvent);
-            
-            // Third attempt: try original URL if it was a Dropbox link
-            if (url !== directUrl && url.includes('dropbox.com')) {
-              console.log('🔄 Trying original Dropbox URL as last resort...');
-              
-              const lastResortAudio = document.createElement('audio');
-              lastResortAudio.style.display = 'none';
-              lastResortAudio.preload = 'metadata';
-              
-              lastResortAudio.oncanplaythrough = async () => {
-                try {
-                  console.log('✅ Last resort audio loaded, duration:', lastResortAudio.duration);
-                  
-                  const duration = lastResortAudio.duration || 30;
-                  const sampleRate = 44100;
-                  const length = Math.floor(duration * sampleRate);
-                  
-                  const audioBuffer = createAudioBuffer(1, length, sampleRate);
-                  const channelData = audioBuffer.getChannelData(0);
-                  
-                  // Generate realistic waveform using shared function
-                  this._generateRealisticWaveform(channelData, sampleRate);
-                  
-                  this._urlAudioElement = lastResortAudio;
-                  
-                  const result = {
-                    audioBuffer: audioBuffer,
-                    waveform: channelData,
-                    globalMaxAmp: 0.7,
-                    isUrlLoaded: true
-                  };
-                  
-                  await this._onFileLoaded(result);
-                  console.log('✅ Successfully loaded audio with original URL');
-                  hideLoading();
-                  resolve();
-                  
-                } catch (error) {
-                  console.error('❌ Last resort also failed:', error);
-                  reject(error);
-                }
-              };
-              
-              lastResortAudio.onerror = () => {
-                reject(new Error(`Failed to load audio from URL (all methods failed): ${url}`));
-              };
-              
-              lastResortAudio.src = url; // Try original URL
-              lastResortAudio.load();
-            } else {
-              reject(new Error(`Failed to load audio from URL (both methods failed): ${directUrl}`));
-            }
-          };
-          
-          // Try loading with fallback
-          fallbackAudio.src = directUrl;
-          fallbackAudio.load();
-        };
-        
-        audio.onloadstart = () => {
-          console.log('🌐 Started loading audio from URL...');
-        };
-        
-        audio.onloadedmetadata = () => {
-          console.log('📊 Audio metadata loaded - duration:', audio.duration);
-        };
-        
-        audio.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const percent = (e.loaded / e.total * 100).toFixed(1);
-            console.log(`📡 Loading progress: ${percent}%`);
-          }
-        };
-        
-        audio.onstalled = () => {
-          console.warn('⚠️ Audio loading stalled');
-        };
-        
-        audio.onsuspend = () => {
-          console.log('⏸️ Audio loading suspended');
-        };
-        
-        // Start loading
-        audio.src = directUrl;
-        audio.load();
-      });
+      // Use existing file loading system for visualization
+      await this._onFileLoaded(result);
+      
+      fileLog('✅ Player: URL audio loaded successfully');
       
     } catch (error) {
       console.error('❌ Failed to load audio from URL:', error);
@@ -494,6 +176,23 @@ export class SpiralWaveformPlayer {
         }
       });
       
+      // Add test file button
+      const testFileButton = document.createElement('button');
+      testFileButton.textContent = 'Load Test File';
+      testFileButton.className = 'test-file-button';
+      testFileButton.title = 'Load local test audio file';
+      this.container.appendChild(testFileButton);
+      
+      testFileButton.addEventListener('click', async () => {
+        const testFilePath = 'assets/test-audio/09. Machines in the Ruins.ogg';
+        // Convert relative path to absolute URL
+        const testFileUrl = new URL(testFilePath, window.location.origin).href;
+        ui('🎵 Player: Test file load requested', 'info', { url: testFileUrl });
+        urlInput.value = testFileUrl;
+        updateSetting('lastUrl', testFileUrl);
+        await this.loadFromUrl(testFileUrl);
+      });
+      
       this.fileInput = setupFileInput(this.container, this._onFileLoaded.bind(this));
       const canvasObj = initializeCanvas();
       this.canvas = canvasObj.canvas;
@@ -588,27 +287,32 @@ export class SpiralWaveformPlayer {
         if (this._urlAudioElement) {
           this._urlAudioElement.pause();
           this._urlAudioElement = null;
-          window.urlAudioElement = null;
+          
+          // DEPRECATED: Sync window global for backwards compatibility
+          if (typeof window !== 'undefined') {
+            window.urlAudioElement = null;
+          }
+          
           audioLog('🔄 Player: Cleared URL audio element for file load');
         }
       } else {
-        // Store URL audio element globally for playback
-        window.urlAudioElement = this._urlAudioElement;
-        audioLog('🎵 Player: Set global URL audio element for playback');
+        // Keep audio element on instance
+        audioLog('🎵 Player: URL audio element stored on player instance');
+        
+        // DEPRECATED: Sync window global for backwards compatibility
+        // TODO: Remove after audio-playback.js and audio-state-adapter.js are refactored
+        if (typeof window !== 'undefined') {
+          window.urlAudioElement = this._urlAudioElement;
+          if (!this._deprecationWarningShown) {
+            console.warn('⚠️ DEPRECATED: window.urlAudioElement is deprecated. Use player.getUrlAudioElement() instead.');
+            this._deprecationWarningShown = true;
+          }
+        }
       }
       
       setAudioBuffer(result.audioBuffer, result.waveform, result.globalMaxAmp);
       await loadAudioForPlayback(result.audioBuffer);
       resetPlayheadAnimation();
-      
-      console.log('🎨 About to call drawCallback, checking state:', {
-        hasDrawCallback: !!this.drawCallback,
-        hasCanvas: !!this.canvas,
-        hasCtx: !!this.ctx,
-        canvasVisible: this.canvas ? (this.canvas.style.display !== 'none' && this.canvas.offsetParent !== null) : false,
-        canvasWidth: this.canvas?.width,
-        canvasHeight: this.canvas?.height
-      });
       
       this.drawCallback();
       
@@ -634,29 +338,20 @@ export class SpiralWaveformPlayer {
     }
   }
 
-  togglePlayPause() {
+  async togglePlayPause() {
     const audioState = getAudioState();
     
-    if (!audioState.audioBuffer) {
-      audioLog('⚠️ Player: Play/pause ignored - no audio loaded');
-      return;
+    // Delegate to audio-controls.js for state management and playback
+    const wasPlaying = audioState.isPlaying;
+    const success = await audioTogglePlayPause();
+    
+    // Handle accessibility announcements
+    if (success !== wasPlaying) {
+      const newState = getAudioState();
+      screenReaderAnnouncer.announcePlayState(newState.isPlaying, newState.currentPlayhead, newState.duration);
     }
-    if (audioState.isPlaying) {
-      audioLog('⏸️ Player: Pausing', 'info', { position: audioState.currentPlayhead.toFixed(2) });
-      pauseAudio();
-      setPlayingState(false);
-      screenReaderAnnouncer.announcePlayState(false, audioState.currentPlayhead, audioState.duration);
-    } else {
-      audioLog('▶️ Player: Playing', 'info', { position: audioState.currentPlayhead.toFixed(2) });
-      playAudio(audioState.currentPlayhead).then(success => {
-        if (success) {
-          setPlayingState(true);
-          screenReaderAnnouncer.announcePlayState(true, audioState.currentPlayhead, audioState.duration);
-        } else {
-          audioLog('❌ Player: Play failed', 'warn');
-        }
-      });
-    }
+    
+    // Update visual representation
     this.drawCallback();
     
     // Update ARIA attributes
@@ -664,52 +359,37 @@ export class SpiralWaveformPlayer {
   }
 
   seekToPosition(normalizedPosition) {
-    const audioState = getAudioState();
-    if (!audioState.audioBuffer) {
-      audioLog('⚠️ Player: Seek ignored - no audio loaded');
-      return;
+    // Delegate to audio-controls.js for state management and seeking
+    const success = audioSeekToPosition(normalizedPosition);
+    
+    if (success) {
+      const audioState = getAudioState();
+      // Announce seek position
+      screenReaderAnnouncer.announceSeek(audioState.currentPlayhead, audioState.duration);
+      
+      // Update visual representation
+      this.drawCallback();
+      
+      // Update ARIA attributes
+      AriaManager.updateCanvasAria(this.canvas, audioState);
     }
-    const clampedPosition = Math.max(0, Math.min(1, normalizedPosition));
-    const targetTime = clampedPosition * audioState.duration;
-    audioLog('⏩ Player: Seeking', 'info', { 
-      from: audioState.currentPlayhead.toFixed(2), 
-      to: targetTime.toFixed(2),
-      percent: (clampedPosition * 100).toFixed(1) + '%'
-    });
-    setPlayhead(targetTime);
-    seekTo(targetTime);
-    this.drawCallback();
-    
-    // Announce seek position
-    screenReaderAnnouncer.announceSeek(targetTime, audioState.duration);
-    
-    // Update ARIA attributes
-    AriaManager.updateCanvasAria(this.canvas, getAudioState());
   }
 
   seekRelative(deltaSeconds) {
-    const audioState = getAudioState();
-    if (!audioState.audioBuffer) {
-      audioLog('⚠️ Player: Relative seek ignored - no audio loaded');
-      return;
+    // Delegate to audio-controls.js for state management and seeking
+    const success = audioSeekRelative(deltaSeconds);
+    
+    if (success) {
+      // Update visual representation
+      this.drawCallback();
     }
-    const newTime = audioState.currentPlayhead + deltaSeconds;
-    const clampedTime = Math.max(0, Math.min(newTime, audioState.duration));
-    audioLog('⏭️ Player: Relative seek', 'info', { 
-      delta: deltaSeconds > 0 ? '+' + deltaSeconds : deltaSeconds,
-      from: audioState.currentPlayhead.toFixed(2),
-      to: clampedTime.toFixed(2)
-    });
-    setPlayhead(clampedTime);
-    seekTo(clampedTime);
-    this.drawCallback();
   }
 
   setVolume(volume) {
-    audioLog('🔊 Player: Volume set', 'info', { volume: (volume * 100).toFixed(0) + '%' });
-    setVolume(volume);
+    // Delegate to audio-controls.js for validation and volume setting
+    const actualVolume = audioSetVolume(volume);
     // Save volume setting
-    updateSetting('volume', volume);
+    updateSetting('volume', actualVolume);
   }
 
   cleanup() {
@@ -729,15 +409,6 @@ export class SpiralWaveformPlayer {
 
   _draw() {
     const audioState = getAudioState();
-
-    console.log('🎨 _draw called:', {
-      hasWaveform: !!audioState.waveform,
-      waveformLength: audioState.waveform?.length,
-      hasAudioBuffer: !!audioState.audioBuffer,
-      duration: audioState.duration,
-      currentPlayhead: audioState.currentPlayhead,
-      isPlaying: audioState.isPlaying
-    });
 
     // ✅ Update playhead from audio during playback (not scrubbing)
     if (audioState.isPlaying && !isScrubbingActive()) {
@@ -765,8 +436,6 @@ export class SpiralWaveformPlayer {
         });
         this._loggedMissingData = true;
       }
-      
-      console.log('⚠️ Drawing fallback (no waveform data)');
       
       // Still draw the play button even without waveform data
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -801,6 +470,15 @@ export class SpiralWaveformPlayer {
     
     console.error(error);
   }
+  
+  /**
+   * Debug method to access URL audio element (dev only)
+   * Exposes internal audio element for debugging without polluting globals
+   * @returns {HTMLAudioElement|null}
+   */
+  getUrlAudioElement() {
+    return this._urlAudioElement || null;
+  }
 }
 
 // Export debug helpers for browser console
@@ -810,6 +488,10 @@ if (typeof window !== 'undefined') {
   window.enablePerformanceMonitor = () => enablePerformanceMonitoring();
   window.printPerformanceReport = () => printPerformanceReport();
   window.getPerformanceReport = () => performanceMonitor.getReport();
+  
+  // Store player instance for debug access
+  window._debugPlayerInstance = null;
+  window.getUrlAudioElement = () => window._debugPlayerInstance?.getUrlAudioElement() || null;
 }
 
 // Auto-enable performance monitoring (can be disabled via console)

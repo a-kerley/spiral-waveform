@@ -63,6 +63,37 @@ const createMockAudioContext = () => ({
 global.AudioContext = vi.fn(createMockAudioContext);
 global.webkitAudioContext = vi.fn(createMockAudioContext);
 
+// Mock AudioBuffer class (needed for instanceof checks in state-manager.js)
+class MockAudioBuffer {
+  constructor(options = {}) {
+    this.numberOfChannels = options.numberOfChannels || 2;
+    this.length = options.length || 44100;
+    this.sampleRate = options.sampleRate || 44100;
+    this.duration = this.length / this.sampleRate;
+  }
+  
+  getChannelData(channel) {
+    return new Float32Array(this.length);
+  }
+}
+global.AudioBuffer = MockAudioBuffer;
+
+// Mock AudioNode class (needed for instanceof checks in state-manager.js)
+class MockAudioNode {
+  constructor() {
+    this.context = null;
+    this.numberOfInputs = 1;
+    this.numberOfOutputs = 1;
+  }
+  
+  connect(destination) {
+    return destination;
+  }
+  
+  disconnect() {}
+}
+global.AudioNode = MockAudioNode;
+
 // Mock OffscreenCanvas (for layer-manager tests)
 global.OffscreenCanvas = class OffscreenCanvas {
   constructor(width, height) {

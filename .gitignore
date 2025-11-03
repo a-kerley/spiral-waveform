@@ -8,6 +8,10 @@ pnpm-lock.yaml
 coverage/
 .nyc_output/
 
+# Test results
+playwright-report/
+test-results/
+
 # Build outputs
 dist/
 build/

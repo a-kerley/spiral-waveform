@@ -5,7 +5,7 @@ import { InteractionValidation, CanvasValidation, ValidationError, TypeValidator
 import { interaction, system } from './logger.js';
 import { CanvasCoordinates, getCanvasCoordinates, toPolarCoordinates, calculateDistance, calculateAngle } from './canvas-math.js';
 import { renderState, RenderComponents } from './render-state.js';
-import { syncInteractionWithScrubState, stopDragging as cleanupDragStateAdapter } from './interaction-state-adapter.js';
+import { syncInteractionWithScrubState, stopDragging as cleanupDragStateAdapter, startDragging as startDraggingStateManager } from './interaction-state-adapter.js';
 
 // ✅ MIGRATION NOTE: syncInteractionWithScrubState and cleanupDragState now come from interaction-state-adapter.js
 // This ensures interaction state is managed through StateManager
@@ -203,9 +203,13 @@ export function setupInteraction(canvas, state, drawCallback, audioCallbacks = {
           // ✅ NEW: Handle tap on play button
           if (buttonDistance <= buttonRadius) {
             interaction('🎵 Play button tapped');
+            e.preventDefault();
             if (audioCallbacks.onPlayPause) {
               interaction('📞 Calling onPlayPause callback');
-              audioCallbacks.onPlayPause();
+              // ✅ FIX: Await async callback and handle errors
+              Promise.resolve(audioCallbacks.onPlayPause()).catch(error => {
+                system('Error in onPlayPause callback', 'error', error);
+              });
             } else {
               interaction('⚠️ No onPlayPause callback available');
             }
@@ -277,10 +281,19 @@ function handleMouseDown(event, canvas, state, drawCallback, audioCallbacks) {
   const buttonRadius = Math.min(width, height) * CONFIG.BUTTON_RADIUS_RATIO;
   const buttonDistance = calculateDistance(x, y, cx, cy);
   
+  interaction(`🖱️ Interaction: Mouse down at (${x.toFixed(1)}, ${y.toFixed(1)}), distance: ${buttonDistance.toFixed(1)}, buttonRadius: ${buttonRadius.toFixed(1)}`);
+  
   if (buttonDistance <= buttonRadius) {
     interaction('🖱️ Interaction: Button clicked');
+    event.stopPropagation();
     if (audioCallbacks.onPlayPause) {
-      audioCallbacks.onPlayPause();
+      interaction('📞 Calling onPlayPause callback');
+      // ✅ FIX: Await async callback and handle errors
+      Promise.resolve(audioCallbacks.onPlayPause()).catch(error => {
+        system('Error in onPlayPause callback', 'error', error);
+      });
+    } else {
+      interaction('⚠️ No onPlayPause callback available');
     }
   } else {
     const distance = calculateDistance(x, y, cx, cy);
@@ -314,6 +327,9 @@ function handleMouseDown(event, canvas, state, drawCallback, audioCallbacks) {
         state.isDragging = true;
         state.dragWasPlaying = wasPlaying;
         state.lastStateChange = performance.now();
+        // ✅ NEW: Update StateManager's drag state so subscribers fire (marks all dirty)
+        const initialMouseAngle = calculateAngleFromMouse(x, y, cx, cy);
+        startDraggingStateManager(initialMouseAngle, currentPlayhead, wasPlaying);
         
         // Mark components dirty when dragging starts
         renderState.markDirty(RenderComponents.PLAYHEAD);
@@ -326,7 +342,6 @@ function handleMouseDown(event, canvas, state, drawCallback, audioCallbacks) {
         }
         
         // Store drag tracking info
-        const initialMouseAngle = calculateAngleFromMouse(x, y, cx, cy);
         state.dragStartAngle = initialMouseAngle;
         state.dragStartPlayhead = currentPlayhead;
         state.dragCurrentPosition = currentPlayhead;

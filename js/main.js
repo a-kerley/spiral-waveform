@@ -154,18 +154,6 @@ async function init() {
       const audioState = getAudioState();
       const currentVisualState = getVisualState(); // Get fresh visual state
       
-      // ✅ NEW: Debug logging for waveform drawing issues
-      console.log('🎨 Draw callback debug:', {
-        hasWaveform: !!audioState.waveform,
-        waveformLength: audioState.waveform ? audioState.waveform.length : 0,
-        hasAudioBuffer: !!audioState.audioBuffer,
-        audioBufferDuration: audioState.audioBuffer ? audioState.audioBuffer.duration : 'N/A',
-        currentPlayhead: audioState.currentPlayhead,
-        isPlaying: audioState.isPlaying,
-        visualStateKeys: Object.keys(currentVisualState),
-        combinedStateKeys: audioState.waveform && audioState.audioBuffer ? Object.keys({ ...currentVisualState, ...audioState }) : 'N/A'
-      });
-      
       if (audioState.waveform && audioState.audioBuffer) {
         // Update playhead from audio
         updatePlayheadFromAudio();
@@ -174,19 +162,8 @@ async function init() {
           audioState.currentPlayhead / audioState.duration : 0;
         const combinedState = { ...currentVisualState, ...audioState };
         
-        console.log('🖼️ About to draw waveform with:', {
-          normalizedPlayhead,
-          combinedStateAudioBuffer: !!combinedState.audioBuffer,
-          combinedStateWaveform: !!combinedState.waveform,
-          combinedStateGlobalMaxAmp: combinedState.globalMaxAmp
-        });
-        
         drawRadialWaveform(ctx, canvas, audioState.waveform, normalizedPlayhead, audioState.isPlaying, combinedState);
       } else {
-        console.warn('⚠️ Cannot draw waveform - missing data:', {
-          hasWaveform: !!audioState.waveform,
-          hasAudioBuffer: !!audioState.audioBuffer
-        });
         // Clear canvas if no audio loaded
         ctx.clearRect(0, 0, canvas.width, canvas.height);
       }

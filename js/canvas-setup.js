@@ -32,24 +32,37 @@ export function setupResponsiveCanvas(canvas, context) {
       'devicePixelRatio'
     );
     
-    const padding = 24 * 2; // match CSS
+    // Get the actual CSS-rendered dimensions of the canvas
+    // This respects CSS constraints like max-width and aspect-ratio
+    const cssWidth = canvas.offsetWidth;
+    const cssHeight = canvas.offsetHeight;
     
-    // ✅ NEW: Validate window dimensions with fallbacks
-    const windowWidth = ensureType(
-      window.innerWidth,
-      (v) => TypeValidator.isNumber(v, { min: 100, max: 10000 }),
-      800,
-      'window.innerWidth'
-    );
-    
-    const windowHeight = ensureType(
-      window.innerHeight,
-      (v) => TypeValidator.isNumber(v, { min: 100, max: 10000 }),
-      600,
-      'window.innerHeight'
-    );
-    
-    const size = Math.min(windowWidth - padding, windowHeight - padding);
+    // If canvas hasn't been rendered yet (no offset dimensions), calculate from window
+    let size;
+    if (cssWidth > 0 && cssHeight > 0) {
+      // Use the smaller of the two dimensions to maintain square aspect ratio
+      size = Math.min(cssWidth, cssHeight);
+      canvasLog(`Canvas CSS dimensions: ${cssWidth}x${cssHeight}, using size: ${size}px`, 'info');
+    } else {
+      // Fallback: calculate from window dimensions with padding
+      const padding = 48; // match CSS default (--spacing-lg * 2 = 24px * 2)
+      const windowWidth = ensureType(
+        window.innerWidth,
+        (v) => TypeValidator.isNumber(v, { min: 100, max: 10000 }),
+        800,
+        'window.innerWidth'
+      );
+      
+      const windowHeight = ensureType(
+        window.innerHeight,
+        (v) => TypeValidator.isNumber(v, { min: 100, max: 10000 }),
+        600,
+        'window.innerHeight'
+      );
+      
+      size = Math.min(windowWidth - padding, windowHeight - padding);
+      canvasLog(`Canvas not yet rendered, using calculated size: ${size}px (window: ${windowWidth}x${windowHeight})`, 'warn');
+    }
     
     // ✅ IMPROVED: Ensure minimum viable size with validation
     const minSize = 100;
@@ -75,8 +88,11 @@ export function setupResponsiveCanvas(canvas, context) {
     try {
       canvas.width = canvasWidth;
       canvas.height = canvasHeight;
-      canvas.style.width = finalSize + 'px';
-      canvas.style.height = finalSize + 'px';
+      // Don't set explicit CSS dimensions - let CSS handle sizing via width: 100%, aspect-ratio: 1/1
+      // This prevents conflicts between CSS constraints and JS-set dimensions
+      // Remove inline width/height style to allow CSS to control rendering
+      canvas.style.width = '';
+      canvas.style.height = '';
 
       // ✅ NEW: Validate the transform operation
       context.setTransform(dpr, 0, 0, dpr, 0, 0);

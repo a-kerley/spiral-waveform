@@ -117,14 +117,6 @@ export class RenderState {
       .filter(([key]) => key !== 'full')
       .some(([, value]) => value === true);
     
-    // Debug: log occasionally
-    if (Math.random() < 0.02) {
-      console.log('🔍 needsRedraw check:', {
-        result,
-        dirty: {...this.#dirty}
-      });
-    }
-    
     return result;
   }
 

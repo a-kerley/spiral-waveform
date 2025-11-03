@@ -4,6 +4,7 @@ import { renderState, RenderComponents, needsRedraw } from './render-state.js';
 import { frameStart, markOperationStart, markOperationEnd } from './performance-monitor.js';
 import { getCurrentTime } from './audio-playback.js';
 import { isPlayheadAnimating } from './waveform-draw.js';
+import { stateManager } from './audio-state-adapter.js';
 
 export function createAnimationLoop(drawCallback, visualState) {
   let lastTimestamp = null;
@@ -45,7 +46,8 @@ export function createAnimationLoop(drawCallback, visualState) {
           renderState.markDirty(RenderComponents.PLAYHEAD);
         }
         
-        if (needsRedraw()) {
+        const shouldRedraw = needsRedraw();
+        if (shouldRedraw) {
           // Measure render time
           markOperationStart('render');
           drawCallback();
@@ -53,10 +55,6 @@ export function createAnimationLoop(drawCallback, visualState) {
           
           renderState.frameRendered();
         } else {
-          // Log occasionally to see if animation loop is running
-          if (Math.random() < 0.02) {
-            console.log('⏭️ Animation loop running but frame skipped - nothing dirty');
-          }
           renderState.frameSkipped();
         }
       }
@@ -80,8 +78,6 @@ function handleEndOfFile(timestamp, visualState, audioState) {
   
   // If playback just ended at the file end, start smooth transition back to full view
   if (justStoppedPlaying && isAtEnd && !visualState.isDragging) {
-    console.log('🎬 Playback ended at file end, starting reset sequence');
-    
     // Mark that we're doing an end-of-file reset
     visualState.isEndOfFileReset = true;
     visualState.endOfFileResetStartTime = timestamp;
@@ -104,14 +100,12 @@ function handleEndOfFile(timestamp, visualState, audioState) {
       setPlayhead(0);
       renderState.markDirty(RenderComponents.PLAYHEAD);
       renderState.markDirty(RenderComponents.TIME_DISPLAY);
-      console.log('🔄 Playhead reset to start during end-of-file transition');
     }
     
     // Complete the end-of-file reset when transition is nearly done
     if (resetElapsed >= resetDuration) {
       visualState.isEndOfFileReset = false;
       visualState.endOfFileResetStartTime = null;
-      console.log('✅ End-of-file reset sequence completed');
     }
   }
 }
@@ -135,15 +129,18 @@ function updateTransitions(timestamp, visualState, audioState) {
       easeInOutCubic(progress) : 
       1 - easeInOutCubic(progress);
     
+    // Mark waveform dirty during transition
+    renderState.markDirty(RenderComponents.WAVEFORM);
+    
     if (progress >= 1) {
       visualState.isTransitioning = false;
       visualState.animationProgress = shouldBeInFocusView ? 1 : 0;
+      renderState.markDirty(RenderComponents.WAVEFORM);
       
       // ✅ UPDATED: Clean up end-of-file reset state when transition completes
       if (visualState.isEndOfFileReset) {
         visualState.isEndOfFileReset = false;
         visualState.endOfFileResetStartTime = null;
-        console.log('🎬 End-of-file transition completed, returned to full view');
       }
     }
   } else {
@@ -178,7 +175,6 @@ function updatePlayback(delta, timestamp, visualState, audioState) {
     if (visualState.isEndOfFileReset) {
       visualState.isEndOfFileReset = false;
       visualState.endOfFileResetStartTime = null;
-      console.log('🎬 Cancelled end-of-file reset - playback started');
     }
     
     const currentlyDragging = visualState.isDragging;
@@ -190,18 +186,16 @@ function updatePlayback(delta, timestamp, visualState, audioState) {
     }
   }
   
-  // Handle playback stopping (animate out to full view)
+  // ✅ UPDATED: Don't animate out when pausing mid-playback
+  // The focused view should remain active so the user can easily resume from the same position
+  // or drag to a new position. Only transition out at end-of-file (handled separately above).
   if (playbackJustStopped && !visualState.isDragging && !visualState.isEndOfFileReset) {
     const actualDuration = audioState.audioBuffer ? audioState.audioBuffer.duration : 0;
     const isAtEnd = audioState.currentPlayhead >= (actualDuration - 0.1);
     
-    // Only animate out if we're not at the end (end-of-file is handled separately)
-    if (!isAtEnd && visualState.animationProgress > 0 && !visualState.isTransitioning) {
-      visualState.isTransitioning = true;
-      visualState.transitionStartTime = timestamp - ((1 - visualState.animationProgress) * CONFIG.TRANSITION_DURATION);
-      visualState.lastStateChange = timestamp;
-      console.log('🎬 Playback stopped - animating out to full view');
-    }
+    // Don't auto-transition when pausing - let playhead hiding handle the visual feedback
+    // End-of-file is already handled in handleEndOfFile()
+    // Mid-track pauses stay in focused view so playhead hiding provides visual feedback
   }
   
   // Update playhead position during playback

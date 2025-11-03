@@ -45,8 +45,6 @@ export class ScrubStateAdapter {
       'interaction.hasAudioSource': false,
       'interaction.lastUpdateTime': now
     });
-    
-    console.log(`🎚️ Scrub state started: position=${position.toFixed(3)}, wasPlaying=${wasPlaying}`);
   }
 
   updateScrubbing(position, velocity = 0) {
@@ -85,8 +83,6 @@ export class ScrubStateAdapter {
       finalPosition: Math.max(0, Math.min(1, finalPosition || currentPosition)),
       shouldResume: shouldResume !== false ? wasPlaying : shouldResume
     };
-
-    console.log(`🎚️ Scrub state stopped: finalPosition=${result.finalPosition.toFixed(3)}, shouldResume=${result.shouldResume}`);
 
     this.reset();
     return result;

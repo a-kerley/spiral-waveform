@@ -1,14 +1,22 @@
 import { getAudioState, setPlayhead, setPlayingState } from './audio-state.js';
-import { playAudio, pauseAudio, seekTo, getCurrentTime, isAudioPlaying, isScrubbingActive } from './audio-playback.js';
-import { CONFIG } from './utils.js'; // Add this missing import!
+import { playAudio, pauseAudio, seekTo, getCurrentTime, isAudioPlaying, isScrubbingActive, setVolume as audioSetVolume } from './audio-playback.js';
+import { CONFIG } from './utils.js';
 import { AudioValidation, ValidationError, safeExecute, withValidation, TypeValidator } from './validation.js';
 import { audio, system } from './logger.js';
 
 // ✅ ENHANCED: Toggle play/pause with comprehensive validation
 export async function togglePlayPause() {
   try {
-    audio('🎵 togglePlayPause called');
+    console.log('🎵 togglePlayPause called');
+    audio('🎵 togglePlayPause called', 'info');
     const audioState = getAudioState();
+    
+    console.log('📊 Audio state:', {
+      hasAudioState: !!audioState,
+      hasAudioBuffer: !!audioState?.audioBuffer,
+      isPlaying: audioState?.isPlaying,
+      duration: audioState?.duration
+    });
     
     audio('📊 Audio state:', {
       hasAudioState: !!audioState,
@@ -40,18 +48,30 @@ export async function togglePlayPause() {
     }
     
     if (audioState.isPlaying) {
+      console.log('⏸️ Currently playing - will pause');
       // Pause
+      // ✅ FIX: Set state BEFORE pausing to prevent race condition
+      setPlayingState(false);
+      console.log('✅ State set to false');
       const pauseResult = safeExecute(() => pauseAudio(), false, 'pauseAudio');
       if (pauseResult !== false) {
-        setPlayingState(false);
         audio('Paused', 'info');
+        console.log('✅ Paused successfully');
         return false;
       } else {
         audio('Failed to pause audio', 'error');
+        console.log('❌ Pause failed');
+        // Restore state if pause failed
+        setPlayingState(true);
         return false;
       }
     } else {
+      console.log('▶️ Currently paused - will play');
       // Play
+      // ✅ FIX: Set state BEFORE playing to prevent race condition
+      setPlayingState(true);
+      console.log('✅ State set to true');
+      
       // ✅ NEW: Validate playhead before playing
       const validatedPlayhead = AudioValidation.validatePlayhead(audioState.currentPlayhead, 'play position');
       
@@ -62,11 +82,14 @@ export async function togglePlayPause() {
       );
       
       if (success) {
-        setPlayingState(true);
         audio('Playing', 'info');
+        console.log('✅ Playing successfully');
         return true;
       } else {
         audio('Failed to start playback', 'error');
+        console.log('❌ Play failed');
+        // Restore state if play failed
+        setPlayingState(false);
         return false;
       }
     }
@@ -183,3 +206,20 @@ export function updatePlayheadFromAudio() {
     return false;
   }
 }
+
+// ✅ NEW: Set volume with validation
+export const setVolume = withValidation(
+  function(volume) {
+    const clampedVolume = Math.max(0, Math.min(1, volume));
+    audioSetVolume(clampedVolume);
+    audio(`Volume set to ${(clampedVolume * 100).toFixed(0)}%`, 'info');
+    return clampedVolume;
+  },
+  [
+    // Parameter validators
+    (vol) => TypeValidator.isNumber(vol, { min: 0, max: 1 }) // volume
+  ],
+  // Return validator
+  (result) => TypeValidator.isNumber(result, { min: 0, max: 1 }),
+  'setVolume'
+);

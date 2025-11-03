@@ -53,16 +53,29 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
  */
 function getDrawingParams(canvas) {
   const dpr = window.devicePixelRatio || 1;
-  const cssWidth = canvas.offsetWidth || (canvas.width / dpr);
-  const cssHeight = canvas.offsetHeight || (canvas.height / dpr);
-  const centerX = cssWidth / 2;
-  const centerY = cssHeight / 2;
+  
+  // Get the CSS-rendered dimensions (what the user sees)
+  let cssWidth = canvas.offsetWidth;
+  let cssHeight = canvas.offsetHeight;
+  
+  // If canvas hasn't been rendered yet, estimate from canvas properties
+  if (cssWidth === 0 || cssHeight === 0) {
+    cssWidth = canvas.width / dpr;
+    cssHeight = canvas.height / dpr;
+  }
+  
+  // Ensure square dimensions for circular waveform
+  // Use the smaller dimension to respect all CSS constraints
   const size = Math.min(cssWidth, cssHeight);
+  
+  // Center should be based on the square size, not the potentially rectangular canvas
+  const centerX = size / 2;
+  const centerY = size / 2;
   
   return {
     dpr,
-    cssWidth,
-    cssHeight,
+    cssWidth: size,
+    cssHeight: size,
     centerX,
     centerY,
     size,
@@ -261,7 +274,11 @@ function drawWithoutLayers(ctx, canvas, waveform, playhead, isPlaying, state, pa
   );
   
   if (!downsampled || downsampled.length === 0) {
-    console.warn('⚠️ No waveform data available for drawing');
+    // Log only once per session to avoid spamming console at 60fps
+    if (!drawWithoutLayers._hasLoggedMissingData) {
+      console.warn('⚠️ No waveform data available for drawing');
+      drawWithoutLayers._hasLoggedMissingData = true;
+    }
     drawPlayPauseButton(ctx, centerX, centerY, innerRadius * 0.8, isPlaying);
     return;
   }
@@ -353,7 +370,7 @@ class AnimationState {
     this.cachedGradient = null;
     this.lastGradientParams = null;
     
-    console.log('🧹 Animation state reset - memory cleaned');
+    // Animation state reset - memory cleaned
   }
 
   // ✅ NEW: Cleanup method to prevent memory leaks
@@ -381,7 +398,11 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
 
   // ✅ TEMPORARY: Test with simple fallback data if missing
   if (!state || !state.audioBuffer || !waveform) {
-    console.warn('⚠️ Missing waveform data - creating test pattern');
+    // Log only once per session to avoid spamming console at 60fps
+    if (!getWaveformData._hasLoggedMissingData) {
+      console.warn('⚠️ Missing waveform data - creating test pattern');
+      getWaveformData._hasLoggedMissingData = true;
+    }
     
     // Create a simple test waveform pattern
     const testWaveform = new Array(numPoints).fill(0).map((_, i) => 
@@ -479,13 +500,7 @@ function getWaveformData(waveform, playhead, isPlaying, state) {
       );
     });
 
-    if (CONFIG.DEBUG_LOGGING && Math.abs(animationState.currentBoostFactor - 1.0) > 0.01) {
-      console.log(
-        `📈 Smooth Boost - Current: ${animationState.currentBoostFactor.toFixed(
-          3
-        )}, Target: ${animationState.targetBoostFactor.toFixed(3)}, Raw: ${rawMax.toFixed(6)}`
-      );
-    }
+    // Boost factor smoothing applied (debug via DevTools breakpoint if needed)
 
     maxAmp = state.globalMaxAmp;
   }
@@ -754,20 +769,10 @@ function drawPlayhead(
   animationProgress,
   effectivePlayhead
 ) {
-  // Enhanced visibility logic - show when playing OR dragging
+  // ✅ UPDATED: Enhanced visibility logic
+  // Show playhead only when playing or actively dragging/scrubbing
+  // Hide when paused to provide visual feedback that playback has stopped
   const shouldShowPlayhead = isPlaying || isDragging;
-
-  // Debug: Log every few frames to see what's happening
-  if (Math.random() < 0.05) { // 5% sampling to avoid log spam
-    console.log(`📍 Playhead state check:`, {
-      isPlaying,
-      isDragging,
-      shouldShow: shouldShowPlayhead,
-      targetVisibility: animationState.playheadTargetVisibility,
-      currentProgress: animationState.playheadAnimationProgress,
-      isAnimating: animationState.isPlayheadAnimatingFlag
-    });
-  }
 
   // ✅ IMPROVED: Use animation state for all playhead animation variables
   // Detect visibility changes
@@ -780,12 +785,6 @@ function drawPlayhead(
     // Also trigger time display animation
     animationState.timeDisplayTargetVisibility = shouldShowPlayhead;
     animationState.isTimeDisplayAnimating = true;
-
-    console.log(`🎯 Playhead visibility changed: ${shouldShowPlayhead}`, {
-      isPlaying,
-      isDragging,
-      currentProgress: animationState.playheadAnimationProgress
-    });
   }
 
   // Update playhead animation progress
@@ -799,12 +798,9 @@ function drawPlayhead(
       animationState.playheadAnimationProgress = 1 - rawProgress;
     }
 
-    console.log(`🔄 Playhead animation progress: ${animationState.playheadAnimationProgress.toFixed(3)}`);
-
     if (rawProgress >= 1) {
       animationState.isPlayheadAnimatingFlag = false;
       animationState.playheadAnimationProgress = animationState.playheadTargetVisibility ? 1 : 0;
-      console.log(`✅ Playhead animation completed. Final progress: ${animationState.playheadAnimationProgress}`);
     }
   }
 
@@ -830,13 +826,7 @@ function drawPlayhead(
 
   // Don't draw playhead if completely retracted
   if (animationState.playheadAnimationProgress <= 0) {
-    console.log('🚫 Skipping playhead draw - progress is 0');
     return;
-  }
-
-  // Log when actually drawing playhead
-  if (Math.random() < 0.1) {
-    console.log(`🎨 Drawing playhead with progress: ${animationState.playheadAnimationProgress}, isPlaying: ${isPlaying}`);
   }
 
   ctx.save();

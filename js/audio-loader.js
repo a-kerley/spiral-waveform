@@ -1,8 +1,10 @@
 import { clearCache } from './waveform-data.js';
 import { showError, showLoading, hideLoading } from './error-ui.js';
-import { AudioContextManager } from './audio-context-manager.js';
+import { AudioContextManager, createAudioBuffer, decodeAudioData } from './audio-context-manager.js';
 import { disposeAudio } from './memory-manager.js';
 import { markOperationStart, markOperationEnd } from './performance-monitor.js';
+import { AudioUrlUtils, toDirectUrl, sanitizeUrl } from './audio-url-utils.js';
+import logger, { file as fileLog } from './logger.js';
 
 // Basic audio file loading function
 async function loadAudioFile(file) {
@@ -273,5 +275,283 @@ export async function handleFileSelect(event) {
     console.info('ℹ️ Supported formats: MP3, WAV, OGG/Vorbis, Opus, M4A/AAC, FLAC, WebM Audio');
     
     return null;
+  }
+}
+
+/**
+ * Load audio from a URL with fallback to placeholder waveform
+ * @param {string} url - The URL to load audio from (supports direct links, Dropbox, etc.)
+ * @returns {Promise<{audioBuffer?: AudioBuffer, waveform: Float32Array, globalMaxAmp?: number, isUrlLoaded: boolean, fileName?: string, audioElement?: HTMLAudioElement}>}
+ */
+export async function loadAudioFromUrl(url) {
+  try {
+    fileLog('🔗 Loader: Loading from URL', 'info', { url: url.substring(0, 100) });
+    
+    // Dispose of previous audio to free memory
+    await disposeAudio();
+    clearCache();
+    
+    // Sanitize and validate URL
+    const sanitizedUrl = sanitizeUrl(url);
+    const urlType = AudioUrlUtils.detectUrlType(sanitizedUrl);
+    
+    fileLog('🔍 Loader: URL type detected', 'info', { type: AudioUrlUtils.describeUrl(sanitizedUrl) });
+    
+    // Convert sharing URLs to direct download URLs
+    const directUrl = toDirectUrl(sanitizedUrl);
+    
+    if (directUrl !== sanitizedUrl) {
+      fileLog('🔄 Loader: Converted to direct URL');
+    }
+
+    fileLog('🌐 Loader: Fetching audio from URL');
+    
+    // Show loading state
+    showLoading('Loading audio from URL...');
+    
+    // Create HTML audio element for playback
+    const audio = document.createElement('audio');
+    audio.style.display = 'none';
+    audio.preload = 'metadata';
+    
+    // Try setting crossOrigin for better compatibility
+    try {
+      audio.crossOrigin = 'anonymous';
+    } catch (e) {
+      console.log('⚠️ CrossOrigin not supported, continuing without it');
+    }
+    
+    return new Promise((resolve, reject) => {
+      let waveformExtracted = false;
+      
+      audio.oncanplaythrough = async () => {
+        // Only extract waveform once
+        if (waveformExtracted) return;
+        waveformExtracted = true;
+        
+        try {
+          console.log('✅ Audio metadata loaded, duration:', audio.duration);
+          
+          // Try to extract real waveform data using Web Audio API
+          await AudioContextManager.resume();
+          
+          console.log('🎵 Attempting to extract real waveform from URL audio...');
+          
+          try {
+            // Fetch audio data for waveform analysis
+            console.log('🌐 Fetching audio data for waveform analysis...');
+            
+            const response = await fetch(directUrl);
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            const arrayBuffer = await response.arrayBuffer();
+            console.log('📊 Audio data fetched, size:', arrayBuffer.byteLength);
+            
+            // Decode the audio data
+            const audioBuffer = await decodeAudioData(arrayBuffer);
+            console.log('🎵 Audio decoded successfully:', {
+              duration: audioBuffer.duration,
+              channels: audioBuffer.numberOfChannels,
+              sampleRate: audioBuffer.sampleRate,
+              length: audioBuffer.length
+            });
+            
+            // Extract real waveform data
+            const channelData = audioBuffer.getChannelData(0);
+            const realWaveform = new Float32Array(channelData);
+            
+            // Calculate real max amplitude
+            let maxAmp = 0;
+            for (let i = 0; i < realWaveform.length; i++) {
+              maxAmp = Math.max(maxAmp, Math.abs(realWaveform[i]));
+            }
+            
+            console.log('✅ Real waveform extracted:', {
+              samples: realWaveform.length,
+              maxAmplitude: maxAmp,
+              duration: audioBuffer.duration
+            });
+            
+            hideLoading();
+            resolve({
+              audioBuffer,
+              waveform: realWaveform,
+              globalMaxAmp: maxAmp,
+              isUrlLoaded: true,
+              audioElement: audio
+            });
+            
+          } catch (webAudioError) {
+            console.warn('⚠️ Could not extract real waveform, will use placeholder:', webAudioError.message);
+            
+            // Return placeholder result - let caller generate waveform
+            const duration = audio.duration || 30;
+            
+            hideLoading();
+            resolve({
+              waveform: null, // Signal that placeholder is needed
+              globalMaxAmp: 0.7,
+              isUrlLoaded: true,
+              audioElement: audio,
+              duration
+            });
+          }
+          
+        } catch (error) {
+          console.error('❌ Error processing URL audio:', error);
+          hideLoading();
+          reject(error);
+        }
+      };
+      
+      audio.onerror = (event) => {
+        console.error('❌ Audio loading error:', event);
+        console.log('🔄 Trying fallback approach without crossOrigin...');
+        
+        // Try fallback without crossOrigin
+        const fallbackAudio = document.createElement('audio');
+        fallbackAudio.style.display = 'none';
+        fallbackAudio.preload = 'metadata';
+        
+        fallbackAudio.oncanplaythrough = async () => {
+          try {
+            console.log('✅ Fallback audio metadata loaded, duration:', fallbackAudio.duration);
+            
+            // Try real waveform extraction with fallback
+            try {
+              console.log('🎵 Attempting real waveform extraction with fallback method...');
+              
+              const response = await fetch(directUrl);
+              const arrayBuffer = await response.arrayBuffer();
+              const audioBuffer = await decodeAudioData(arrayBuffer);
+              
+              const channelData = audioBuffer.getChannelData(0);
+              const realWaveform = new Float32Array(channelData);
+              
+              let maxAmp = 0;
+              for (let i = 0; i < realWaveform.length; i++) {
+                maxAmp = Math.max(maxAmp, Math.abs(realWaveform[i]));
+              }
+              
+              console.log('🎉 Fallback method extracted REAL waveform!');
+              hideLoading();
+              resolve({
+                audioBuffer,
+                waveform: realWaveform,
+                globalMaxAmp: maxAmp,
+                isUrlLoaded: true,
+                audioElement: fallbackAudio
+              });
+              return;
+              
+            } catch (realWaveformError) {
+              console.warn('⚠️ Fallback real waveform extraction failed, using placeholder:', realWaveformError.message);
+            }
+            
+            // Fallback to placeholder
+            const duration = fallbackAudio.duration || 30;
+            
+            hideLoading();
+            resolve({
+              waveform: null, // Signal that placeholder is needed
+              globalMaxAmp: 0.7,
+              isUrlLoaded: true,
+              audioElement: fallbackAudio,
+              duration
+            });
+            
+          } catch (error) {
+            console.error('❌ Fallback also failed:', error);
+            hideLoading();
+            reject(error);
+          }
+        };
+        
+        fallbackAudio.onerror = (fallbackEvent) => {
+          console.error('❌ Fallback audio loading also failed:', fallbackEvent);
+          
+          // Last resort: try original URL for Dropbox links
+          if (url !== directUrl && url.includes('dropbox.com')) {
+            console.log('🔄 Trying original Dropbox URL as last resort...');
+            
+            const lastResortAudio = document.createElement('audio');
+            lastResortAudio.style.display = 'none';
+            lastResortAudio.preload = 'metadata';
+            
+            lastResortAudio.oncanplaythrough = async () => {
+              try {
+                console.log('✅ Last resort audio loaded, duration:', lastResortAudio.duration);
+                const duration = lastResortAudio.duration || 30;
+                
+                hideLoading();
+                resolve({
+                  waveform: null, // Signal that placeholder is needed
+                  globalMaxAmp: 0.7,
+                  isUrlLoaded: true,
+                  audioElement: lastResortAudio,
+                  duration
+                });
+              } catch (error) {
+                console.error('❌ Last resort also failed:', error);
+                hideLoading();
+                reject(error);
+              }
+            };
+            
+            lastResortAudio.onerror = () => {
+              hideLoading();
+              reject(new Error(`Failed to load audio from URL (all methods failed): ${url}`));
+            };
+            
+            lastResortAudio.src = url;
+            lastResortAudio.load();
+          } else {
+            hideLoading();
+            reject(new Error(`Failed to load audio from URL (both methods failed): ${directUrl}`));
+          }
+        };
+        
+        fallbackAudio.src = directUrl;
+        fallbackAudio.load();
+      };
+      
+      audio.onloadstart = () => {
+        console.log('🌐 Started loading audio from URL...');
+      };
+      
+      audio.onloadedmetadata = () => {
+        console.log('📊 Audio metadata loaded - duration:', audio.duration);
+      };
+      
+      audio.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = (e.loaded / e.total * 100).toFixed(1);
+          console.log(`📡 Loading progress: ${percent}%`);
+        }
+      };
+      
+      audio.onstalled = () => {
+        console.warn('⚠️ Audio loading stalled');
+      };
+      
+      audio.onsuspend = () => {
+        console.log('⏸️ Audio loading suspended');
+      };
+      
+      // Start loading
+      audio.src = directUrl;
+      audio.load();
+    });
+    
+  } catch (error) {
+    console.error('❌ Failed to load audio from URL:', error);
+    hideLoading();
+    showError(error, {
+      dismissible: true,
+      autoDismiss: 8000
+    });
+    throw error;
   }
 }
