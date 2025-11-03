@@ -7,7 +7,15 @@ import { audio, system } from './logger.js';
 // ✅ ENHANCED: Toggle play/pause with comprehensive validation
 export async function togglePlayPause() {
   try {
+    audio('🎵 togglePlayPause called');
     const audioState = getAudioState();
+    
+    audio('📊 Audio state:', {
+      hasAudioState: !!audioState,
+      hasAudioBuffer: !!audioState?.audioBuffer,
+      isPlaying: audioState?.isPlaying,
+      duration: audioState?.duration
+    });
     
     // ✅ NEW: Validate audio state and buffer
     if (!audioState || typeof audioState !== 'object') {

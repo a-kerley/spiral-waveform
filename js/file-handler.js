@@ -88,17 +88,36 @@ export async function handleFileLoad(event, callback = null) {
     file('Audio file loaded and ready for playback', 'info');
     
     // ✅ NEW: Call callback if provided and validate its execution
+    console.log('🔍 Callback check:', {
+      hasCallback: !!callback,
+      callbackType: typeof callback,
+      callbackName: callback?.name
+    });
+    
     if (callback) {
       try {
+        console.log('📞 Calling file load callback with result:', {
+          hasResult: !!result,
+          hasBuffer: !!result.audioBuffer,
+          hasWaveform: !!result.waveform
+        });
         const callbackResult = callback(result);
+        console.log('✅ Callback returned:', { 
+          resultType: typeof callbackResult,
+          isPromise: callbackResult instanceof Promise
+        });
         file('File load callback executed successfully', 'debug');
         if (callbackResult instanceof Promise) {
           await callbackResult;
+          console.log('✅ Callback promise resolved');
         }
       } catch (callbackError) {
+        console.error('❌ File load callback failed:', callbackError);
         system('File load callback failed', 'warn', callbackError);
         // Don't rethrow callback errors - file loading succeeded
       }
+    } else {
+      console.log('⚠️ No callback provided to handleFileLoad');
     }
     
     return result;

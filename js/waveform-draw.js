@@ -4,6 +4,22 @@ import {
   getFullFileDownsampled,
   prepareWindowData,
 } from "./waveform-data.js";
+import { renderState, RenderComponents } from './render-state.js';
+import { sinRad, cosRad } from './trig-cache.js';
+import { 
+  layerManager, 
+  getWaveformContext, 
+  getPlayheadContext, 
+  compositeLayers,
+  clearWaveformLayer,
+  clearPlayheadLayer,
+  needsWaveformRedraw,
+  needsPlayheadRedraw,
+  isLayersEnabled,
+  Layers
+} from './layer-manager.js';
+import { markOperationStart, markOperationEnd } from './performance-monitor.js';
+import { canvas as canvasLog, animation } from './logger.js';
 
 // Add this polyfill near the top of the file if roundRect is not supported
 if (!CanvasRenderingContext2D.prototype.roundRect) {
@@ -32,6 +48,131 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
   };
 }
 
+/**
+ * Helper function to calculate common drawing parameters
+ */
+function getDrawingParams(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssWidth = canvas.offsetWidth || (canvas.width / dpr);
+  const cssHeight = canvas.offsetHeight || (canvas.height / dpr);
+  const centerX = cssWidth / 2;
+  const centerY = cssHeight / 2;
+  const size = Math.min(cssWidth, cssHeight);
+  
+  return {
+    dpr,
+    cssWidth,
+    cssHeight,
+    centerX,
+    centerY,
+    size,
+    innerRadius: size * CONFIG.INNER_RADIUS_RATIO,
+    maxThickness: size * CONFIG.MAX_THICKNESS_RATIO,
+    minThickness: size * CONFIG.MIN_THICKNESS_RATIO,
+    buttonRadius: size * CONFIG.BUTTON_RADIUS_RATIO
+  };
+}
+
+/**
+ * Draw static waveform layer (Layer 0)
+ * Only redraws when audio changes
+ */
+function drawWaveformLayer(ctx, canvas, waveform, playhead, state, params) {
+  const { centerX, centerY, innerRadius, maxThickness, minThickness } = params;
+  
+  // Clear the layer
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  // Get waveform data
+  const { downsampled, maxAmp, numPoints } = getWaveformData(
+    waveform,
+    playhead,
+    false, // Pass false for isPlaying since waveform shape doesn't change
+    state
+  );
+  
+  if (!downsampled || downsampled.length === 0) {
+    return false;
+  }
+
+  // Create gradient for the waveform
+  const gradient = createWaveformGradient(
+    ctx,
+    centerX,
+    centerY,
+    innerRadius,
+    maxThickness,
+    CONFIG.WAVEFORM_COLORS.INNER
+  );
+  
+  // Use the beautiful gradient for the waveform
+  ctx.fillStyle = gradient;
+  
+  // Draw the main waveform path with real data
+  drawWaveformPath(
+    ctx,
+    downsampled,
+    numPoints,
+    centerX,
+    centerY,
+    innerRadius,
+    maxThickness,
+    minThickness,
+    maxAmp || 1,
+    state.animationProgress || 0,
+    waveform,
+    playhead,
+    state
+  );
+  
+  return true;
+}
+
+/**
+ * Draw dynamic playhead layer (Layer 1)
+ * Redraws every frame during playback
+ */
+function drawPlayheadLayer(ctx, canvas, playhead, isPlaying, state, params) {
+  const { centerX, centerY, cssWidth, innerRadius, maxThickness, buttonRadius } = params;
+  
+  // Clear the layer
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  // Draw playhead indicator
+  drawPlayhead(
+    ctx,
+    centerX,
+    centerY,
+    innerRadius,
+    maxThickness,
+    isPlaying,
+    state.isDragging || false,
+    state.animationProgress || 0,
+    playhead
+  );
+  
+  // Draw time display if needed
+  if (state.audioBuffer && state.duration > 0) {
+    const currentTime = playhead * state.duration;
+    drawPlayheadTime(
+      ctx,
+      centerX,
+      centerY,
+      innerRadius,
+      maxThickness,
+      currentTime,
+      state.duration,
+      cssWidth
+    );
+  }
+  
+  // Draw play/pause button in center
+  drawPlayPauseButton(ctx, centerX, centerY, buttonRadius, isPlaying);
+}
+
+/**
+ * Main drawing function with layer optimization
+ */
 export function drawRadialWaveform(
   ctx,
   canvas,
@@ -40,25 +181,78 @@ export function drawRadialWaveform(
   isPlaying,
   state
 ) {
-  // IMPORTANT: Don't reset transform - use the device pixel ratio setup from canvas-setup.js
+  const params = getDrawingParams(canvas);
+  
+  // Try to use layer-based rendering if available
+  if (isLayersEnabled()) {
+    // Initialize layers if needed
+    layerManager.initialize(canvas.width, canvas.height, params.dpr);
+    
+    // Render waveform layer only if dirty
+    if (needsWaveformRedraw()) {
+      canvasLog('🎨 Canvas: Redrawing waveform layer');
+      const waveformCtx = getWaveformContext();
+      if (waveformCtx) {
+        markOperationStart('waveform-layer');
+        const success = drawWaveformLayer(waveformCtx, canvas, waveform, playhead, state, params);
+        const renderTime = markOperationEnd('waveform-layer');
+        layerManager.waveformRendered(renderTime);
+        animation('⚡ Canvas: Waveform layer rendered', 'debug', { time: renderTime.toFixed(2) + 'ms' });
+        
+        if (!success) {
+          canvasLog('⚠️ Canvas: Layer render failed, using fallback', 'warn');
+          // Fallback to non-layered rendering
+          drawWithoutLayers(ctx, canvas, waveform, playhead, isPlaying, state, params);
+          renderState.markAllClean();
+          return;
+        }
+      }
+    }
+    
+    // Render playhead layer only if dirty
+    if (needsPlayheadRedraw()) {
+      const playheadCtx = getPlayheadContext();
+      if (playheadCtx) {
+        markOperationStart('playhead-layer');
+        drawPlayheadLayer(playheadCtx, canvas, playhead, isPlaying, state, params);
+        const renderTime = markOperationEnd('playhead-layer');
+        layerManager.playheadRendered(renderTime);
+        animation('⚡ Canvas: Playhead layer rendered', 'debug', { time: renderTime.toFixed(2) + 'ms' });
+      }
+    }
+    
+    // Composite layers onto main canvas
+    markOperationStart('composite-layers');
+    const success = compositeLayers(ctx);
+    const compositeTime = markOperationEnd('composite-layers');
+    animation('⚡ Canvas: Layers composited', 'debug', { time: compositeTime.toFixed(2) + 'ms' });
+    
+    if (!success) {
+      canvasLog('⚠️ Canvas: Composite failed, using fallback', 'warn');
+      // Fallback to non-layered rendering
+      drawWithoutLayers(ctx, canvas, waveform, playhead, isPlaying, state, params);
+    }
+    
+    // Mark all components as clean after rendering
+    renderState.markAllClean();
+  } else {
+    animation('🎨 Canvas: Using non-layered rendering', 'debug');
+    // Fallback to non-layered rendering
+    drawWithoutLayers(ctx, canvas, waveform, playhead, isPlaying, state, params);
+    renderState.markAllClean();
+  }
+}
+
+/**
+ * Fallback rendering without layers (original implementation)
+ */
+function drawWithoutLayers(ctx, canvas, waveform, playhead, isPlaying, state, params) {
+  const { centerX, centerY, cssWidth, innerRadius, maxThickness, minThickness, buttonRadius } = params;
+  
+  // Clear canvas
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   
-  // Get device pixel ratio for proper coordinate calculations
-  const dpr = window.devicePixelRatio || 1;
-  
-  // Calculate coordinates using CSS size, not internal canvas size
-  const cssWidth = canvas.offsetWidth || (canvas.width / dpr);
-  const cssHeight = canvas.offsetHeight || (canvas.height / dpr);
-  const centerX = cssWidth / 2;
-  const centerY = cssHeight / 2;
-  const size = Math.min(cssWidth, cssHeight);
-  
-  // Calculate radii and thickness based on CSS size (not internal canvas size)
-  const innerRadius = size * CONFIG.INNER_RADIUS_RATIO;
-  const maxThickness = size * CONFIG.MAX_THICKNESS_RATIO;
-  const minThickness = size * CONFIG.MIN_THICKNESS_RATIO;
-  
-  // Get waveform data using the original sophisticated system
+  // Get waveform data
   const { downsampled, maxAmp, numPoints } = getWaveformData(
     waveform,
     playhead,
@@ -82,20 +276,19 @@ export function drawRadialWaveform(
     CONFIG.WAVEFORM_COLORS.INNER
   );
   
-  // Use the beautiful gradient for the waveform
   ctx.fillStyle = gradient;
   
-  // Draw the main waveform path with real data
+  // Draw the main waveform path
   drawWaveformPath(
     ctx,
-    downsampled, // Use real data now
+    downsampled,
     numPoints,
     centerX,
     centerY,
     innerRadius,
     maxThickness,
     minThickness,
-    maxAmp || 1, // Ensure maxAmp is not 0
+    maxAmp || 1,
     state.animationProgress || 0,
     waveform,
     playhead,
@@ -131,7 +324,6 @@ export function drawRadialWaveform(
   }
   
   // Draw play/pause button in center
-  const buttonRadius = Math.min(cssWidth, cssHeight) * CONFIG.BUTTON_RADIUS_RATIO;
   drawPlayPauseButton(ctx, centerX, centerY, buttonRadius, isPlaying);
 }
 
@@ -349,8 +541,9 @@ function drawWaveformPath(
     const normalizedAmp = maxAmp > 0 ? amp / maxAmp : 0;
     const radius = innerRadius + normalizedAmp * thickness;
 
-    const x = cx + radius * Math.cos(angle);
-    const y = cy + radius * Math.sin(angle);
+    // Use cached trig functions for better performance
+    const x = cx + radius * cosRad(angle);
+    const y = cy + radius * sinRad(angle);
 
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -361,8 +554,9 @@ function drawWaveformPath(
     const t = i / (numPoints - 1);
     const angle = playheadAngle + t * waveformArcLength;
 
-    const x = cx + innerRadius * Math.cos(angle);
-    const y = cy + innerRadius * Math.sin(angle);
+    // Use cached trig functions for better performance
+    const x = cx + innerRadius * cosRad(angle);
+    const y = cy + innerRadius * sinRad(angle);
     ctx.lineTo(x, y);
   }
 
@@ -527,8 +721,9 @@ function drawWaveformClipPath(
     const normalizedAmp = maxAmp > 0 ? amp / maxAmp : 0;
     const radius = innerRadius + normalizedAmp * thickness;
 
-    const x = cx + radius * Math.cos(angle);
-    const y = cy + radius * Math.sin(angle);
+    // Use cached trig functions for better performance
+    const x = cx + radius * cosRad(angle);
+    const y = cy + radius * sinRad(angle);
 
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -539,8 +734,9 @@ function drawWaveformClipPath(
     const t = i / (numPoints - 1);
     const angle = playheadAngle + t * waveformArcLength;
 
-    const x = cx + innerRadius * Math.cos(angle);
-    const y = cy + innerRadius * Math.sin(angle);
+    // Use cached trig functions for better performance
+    const x = cx + innerRadius * cosRad(angle);
+    const y = cy + innerRadius * sinRad(angle);
     ctx.lineTo(x, y);
   }
 
@@ -561,6 +757,18 @@ function drawPlayhead(
   // Enhanced visibility logic - show when playing OR dragging
   const shouldShowPlayhead = isPlaying || isDragging;
 
+  // Debug: Log every few frames to see what's happening
+  if (Math.random() < 0.05) { // 5% sampling to avoid log spam
+    console.log(`📍 Playhead state check:`, {
+      isPlaying,
+      isDragging,
+      shouldShow: shouldShowPlayhead,
+      targetVisibility: animationState.playheadTargetVisibility,
+      currentProgress: animationState.playheadAnimationProgress,
+      isAnimating: animationState.isPlayheadAnimatingFlag
+    });
+  }
+
   // ✅ IMPROVED: Use animation state for all playhead animation variables
   // Detect visibility changes
   const now = performance.now();
@@ -573,7 +781,11 @@ function drawPlayhead(
     animationState.timeDisplayTargetVisibility = shouldShowPlayhead;
     animationState.isTimeDisplayAnimating = true;
 
-    console.log(`🎯 Playhead visibility changed: ${shouldShowPlayhead}`);
+    console.log(`🎯 Playhead visibility changed: ${shouldShowPlayhead}`, {
+      isPlaying,
+      isDragging,
+      currentProgress: animationState.playheadAnimationProgress
+    });
   }
 
   // Update playhead animation progress
@@ -587,9 +799,12 @@ function drawPlayhead(
       animationState.playheadAnimationProgress = 1 - rawProgress;
     }
 
+    console.log(`🔄 Playhead animation progress: ${animationState.playheadAnimationProgress.toFixed(3)}`);
+
     if (rawProgress >= 1) {
       animationState.isPlayheadAnimatingFlag = false;
       animationState.playheadAnimationProgress = animationState.playheadTargetVisibility ? 1 : 0;
+      console.log(`✅ Playhead animation completed. Final progress: ${animationState.playheadAnimationProgress}`);
     }
   }
 
@@ -614,7 +829,15 @@ function drawPlayhead(
   }
 
   // Don't draw playhead if completely retracted
-  if (animationState.playheadAnimationProgress <= 0) return;
+  if (animationState.playheadAnimationProgress <= 0) {
+    console.log('🚫 Skipping playhead draw - progress is 0');
+    return;
+  }
+
+  // Log when actually drawing playhead
+  if (Math.random() < 0.1) {
+    console.log(`🎨 Drawing playhead with progress: ${animationState.playheadAnimationProgress}, isPlaying: ${isPlaying}`);
+  }
 
   ctx.save();
 
@@ -772,4 +995,7 @@ export function drawPlayPauseButton(ctx, cx, cy, radius, isPlaying) {
 
   ctx.restore();
 }
+
+// Export layer manager for debugging
+export { layerManager };
 

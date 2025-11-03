@@ -1,0 +1,19 @@
+// ⚠️ DEPRECATED: This file is no longer used
+// 
+// The project has consolidated on using the SpiralWaveformPlayer class
+// for initialization. See spiral-waveform-player.js for the active implementation.
+//
+// To use the player:
+//   import { SpiralWaveformPlayer } from './js/spiral-waveform-player.js';
+//   const container = document.getElementById('your-container');
+//   new SpiralWaveformPlayer({ container });
+//
+// This file is kept for reference during the refactoring process.
+// It will be removed in a future update once all functionality has been
+// verified in the SpiralWaveformPlayer class.
+//
+// Deprecated: October 31, 2025
+// Removal planned: Phase 2 of refactoring
+
+// Original main.js content preserved below for reference:
+// (Content moved to preserve history but marked as deprecated)

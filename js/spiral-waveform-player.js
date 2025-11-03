@@ -6,10 +6,18 @@ import { setupFileInput, handleFileLoad } from './file-handler.js';
 import { initializeCanvas, setupResponsiveCanvas } from './canvas-setup.js';
 import { setupInteraction } from './interaction.js';
 import { createAnimationLoop } from './animation.js';
-import { drawRadialWaveform, drawPlayPauseButton, resetPlayheadAnimation } from './waveform-draw.js';
+import { drawRadialWaveform, drawPlayPauseButton, resetPlayheadAnimation, layerManager } from './waveform-draw.js';
 import { CONFIG } from './utils.js';
-import { updatePlayheadFromAudio } from './audio-controls.js'; // Add this import
-// Duplicate class declaration removed
+import { updatePlayheadFromAudio } from './audio-controls.js';
+import { AudioUrlUtils, toDirectUrl, sanitizeUrl } from './audio-url-utils.js';
+import { showError, showLoading, hideLoading } from './error-ui.js';
+import { AudioContextManager, createAudioBuffer, decodeAudioData } from './audio-context-manager.js';
+import { SettingsManager, loadSettings, updateSetting } from './settings-manager.js';
+import { enablePerformanceMonitoring, printPerformanceReport, performanceMonitor } from './performance-monitor.js';
+import { performanceOverlay } from './performance-overlay.js';
+import { screenReaderAnnouncer, KeyboardNavigationManager, AriaManager } from './accessibility.js';
+import logger, { system, audio as audioLog, ui, file as fileLog } from './logger.js';
+
 export class SpiralWaveformPlayer {
   // ✅ NEW: Generate realistic placeholder waveform
   _generateRealisticWaveform(channelData, sampleRate) {
@@ -58,43 +66,38 @@ export class SpiralWaveformPlayer {
   // Load audio from a URL (supports direct links, Dropbox, etc.)
   async loadFromUrl(url) {
     try {
-      // Enhanced Dropbox URL handling for modern sharing links
-      let directUrl = url;
+      fileLog('🔗 Player: Loading from URL', 'info', { url: url.substring(0, 100) });
       
-      // Handle different Dropbox URL formats
-      if (url.includes('dropbox.com')) {
-        console.log('🔗 Detected Dropbox URL, converting to direct download...');
-        
-        // Modern Dropbox sharing links: /scl/fi/ format
-        if (url.includes('/scl/fi/')) {
-          // Method 1: Try the raw.githubusercontent-style approach
-          const rawUrl = url.replace('www.dropbox.com', 'dl.dropboxusercontent.com')
-                            .replace('dropbox.com', 'dl.dropboxusercontent.com')
-                            .replace('?rlkey=', '?raw=1&rlkey=')
-                            .replace('dl=1', 'raw=1');
-          
-          console.log('🔄 Trying raw Dropbox URL:', rawUrl);
-          directUrl = rawUrl;
-        }
-        // Legacy method: Ensure dl=1 parameter
-        else {
-          if (url.includes('dl=0')) {
-            directUrl = url.replace('dl=0', 'dl=1');
-          } else if (!url.includes('dl=1')) {
-            directUrl = url + (url.includes('?') ? '&' : '?') + 'dl=1';
-          }
-        }
-        
-        console.log('🔄 Converted Dropbox URL:', directUrl);
+      // Dispose of previous audio to free memory
+      const { disposeAudio } = await import('./memory-manager.js');
+      await disposeAudio();
+      
+      // Sanitize and validate URL
+      const sanitizedUrl = sanitizeUrl(url);
+      const urlType = AudioUrlUtils.detectUrlType(sanitizedUrl);
+      
+      fileLog('� Player: URL type detected', 'info', { type: AudioUrlUtils.describeUrl(sanitizedUrl) });
+      
+      // Convert sharing URLs to direct download URLs
+      const directUrl = toDirectUrl(sanitizedUrl);
+      
+      if (directUrl !== sanitizedUrl) {
+        fileLog('🔄 Player: Converted to direct URL');
       }
 
-      console.log('🌐 Loading audio from URL:', directUrl);
+      fileLog('🌐 Player: Fetching audio from URL');
+      
+      // Show loading state
+      showLoading('Loading audio from URL...');
       
       // WaveSurfer approach: Use HTML audio element for MediaElement backend
       return new Promise((resolve, reject) => {
         const audio = document.createElement('audio');
         audio.style.display = 'none';
         audio.preload = 'metadata';
+        
+        // Guard to prevent multiple waveform extractions
+        let waveformExtracted = false;
         
         // Try setting crossOrigin for better compatibility, but don't require it
         try {
@@ -104,18 +107,16 @@ export class SpiralWaveformPlayer {
         }
         
         audio.oncanplaythrough = async () => {
+          // Only extract waveform once
+          if (waveformExtracted) {
+            return;
+          }
+          waveformExtracted = true;
           try {
             console.log('✅ Audio metadata loaded, duration:', audio.duration);
             
             // Now try to extract real waveform data using Web Audio API
-            if (!window.audioContext) {
-              window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            
-            // Resume audio context if needed
-            if (window.audioContext.state === 'suspended') {
-              await window.audioContext.resume();
-            }
+            await AudioContextManager.resume();
             
             console.log('🎵 Attempting to extract real waveform from URL audio...');
             
@@ -133,7 +134,7 @@ export class SpiralWaveformPlayer {
               console.log('📊 Audio data fetched, size:', arrayBuffer.byteLength);
               
               // Decode the audio data
-              const audioBuffer = await window.audioContext.decodeAudioData(arrayBuffer);
+              const audioBuffer = await decodeAudioData(arrayBuffer);
               console.log('🎵 Audio decoded successfully:', {
                 duration: audioBuffer.duration,
                 channels: audioBuffer.numberOfChannels,
@@ -159,7 +160,6 @@ export class SpiralWaveformPlayer {
               
               // Store the HTML audio element for actual playback (keep it simple)
               this._urlAudioElement = audio;
-              window.urlAudioElement = audio;
               
               // Create result object with REAL waveform data
               const result = {
@@ -173,6 +173,7 @@ export class SpiralWaveformPlayer {
               await this._onFileLoaded(result);
               
               console.log('🎉 Successfully loaded URL audio with REAL waveform data!');
+              hideLoading();
               resolve();
               
             } catch (webAudioError) {
@@ -183,7 +184,7 @@ export class SpiralWaveformPlayer {
               const sampleRate = 44100;
               const length = Math.floor(duration * sampleRate);
               
-              const audioBuffer = window.audioContext.createBuffer(1, length, sampleRate);
+              const audioBuffer = createAudioBuffer(1, length, sampleRate);
               const channelData = audioBuffer.getChannelData(0);
               
               // Generate realistic waveform using shared function
@@ -191,7 +192,6 @@ export class SpiralWaveformPlayer {
               
               // Store the HTML audio element for actual playback
               this._urlAudioElement = audio;
-              window.urlAudioElement = audio;
               
               // Create result object for visualization
               const result = {
@@ -203,6 +203,7 @@ export class SpiralWaveformPlayer {
               
               await this._onFileLoaded(result);
               console.log('✅ Successfully loaded audio from URL with placeholder waveform');
+              hideLoading();
               resolve();
             }
             
@@ -232,7 +233,7 @@ export class SpiralWaveformPlayer {
                 
                 const response = await fetch(directUrl);
                 const arrayBuffer = await response.arrayBuffer();
-                const audioBuffer = await window.audioContext.decodeAudioData(arrayBuffer);
+                const audioBuffer = await decodeAudioData(arrayBuffer);
                 
                 const channelData = audioBuffer.getChannelData(0);
                 const realWaveform = new Float32Array(channelData);
@@ -243,7 +244,6 @@ export class SpiralWaveformPlayer {
                 }
                 
                 this._urlAudioElement = fallbackAudio;
-                window.urlAudioElement = fallbackAudio;
                 
                 const result = {
                   audioBuffer: audioBuffer,
@@ -254,6 +254,7 @@ export class SpiralWaveformPlayer {
                 
                 await this._onFileLoaded(result);
                 console.log('🎉 Fallback method extracted REAL waveform!');
+                hideLoading();
                 resolve();
                 return;
                 
@@ -266,11 +267,7 @@ export class SpiralWaveformPlayer {
               const sampleRate = 44100;
               const length = Math.floor(duration * sampleRate);
               
-              if (!window.audioContext) {
-                window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-              }
-              
-              const audioBuffer = window.audioContext.createBuffer(1, length, sampleRate);
+              const audioBuffer = createAudioBuffer(1, length, sampleRate);
               const channelData = audioBuffer.getChannelData(0);
               
               // Generate realistic waveform using shared function
@@ -278,7 +275,6 @@ export class SpiralWaveformPlayer {
               
               // Store fallback audio element
               this._urlAudioElement = fallbackAudio;
-              window.urlAudioElement = fallbackAudio;
               
               const result = {
                 audioBuffer: audioBuffer,
@@ -289,6 +285,7 @@ export class SpiralWaveformPlayer {
               
               await this._onFileLoaded(result);
               console.log('✅ Successfully loaded audio from URL with fallback method');
+              hideLoading();
               resolve();
               
             } catch (error) {
@@ -316,18 +313,13 @@ export class SpiralWaveformPlayer {
                   const sampleRate = 44100;
                   const length = Math.floor(duration * sampleRate);
                   
-                  if (!window.audioContext) {
-                    window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                  }
-                  
-                  const audioBuffer = window.audioContext.createBuffer(1, length, sampleRate);
+                  const audioBuffer = createAudioBuffer(1, length, sampleRate);
                   const channelData = audioBuffer.getChannelData(0);
                   
                   // Generate realistic waveform using shared function
                   this._generateRealisticWaveform(channelData, sampleRate);
                   
                   this._urlAudioElement = lastResortAudio;
-                  window.urlAudioElement = lastResortAudio;
                   
                   const result = {
                     audioBuffer: audioBuffer,
@@ -338,6 +330,7 @@ export class SpiralWaveformPlayer {
                   
                   await this._onFileLoaded(result);
                   console.log('✅ Successfully loaded audio with original URL');
+                  hideLoading();
                   resolve();
                   
                 } catch (error) {
@@ -396,6 +389,7 @@ export class SpiralWaveformPlayer {
     }
   }
   constructor(options = {}) {
+    system('🎵 Player: Initializing SpiralWaveformPlayer', 'info', { options });
     this.options = options;
     this.container = options.container || document.body;
     this.visualState = {
@@ -418,37 +412,97 @@ export class SpiralWaveformPlayer {
 
   async _init() {
     try {
+      system('🎵 Player: Starting initialization');
       await initializeAudio();
+      
+      // Load saved settings
+      const settings = loadSettings();
+      system('📋 Player: Loaded settings', 'info', { hasUrl: !!settings.lastUrl, hasFile: !!settings.lastFileName, volume: settings.volume });
+      
       // Enhanced UI: add a URL input for Dropbox/direct links
       this.ui = createUI(this.container);
       const urlInput = document.createElement('input');
       urlInput.type = 'text';
       urlInput.placeholder = 'Paste audio URL (Dropbox, direct, etc.)';
       urlInput.id = 'urlInput';
-      urlInput.style.margin = '12px auto';
-      urlInput.style.width = '80%';
-      urlInput.style.padding = '8px';
-      urlInput.style.fontSize = '16px';
+      urlInput.className = 'url-input';
+      
+      // Restore last URL if available
+      if (settings.lastUrl) {
+        urlInput.value = settings.lastUrl;
+        ui('🔄 Player: Restored last URL', 'info', { url: settings.lastUrl.substring(0, 50) + '...' });
+      }
+      
       this.container.appendChild(urlInput);
+      
+      // Show last loaded info with clear button
+      if (settings.lastFileName || settings.lastUrl) {
+        const lastLoadedInfo = document.createElement('div');
+        lastLoadedInfo.className = 'last-loaded-info';
+        
+        const infoText = document.createElement('div');
+        infoText.style.display = 'flex';
+        infoText.style.alignItems = 'center';
+        infoText.style.gap = 'var(--spacing-sm)';
+        infoText.innerHTML = `
+          <span class="last-loaded-label">Last loaded:</span>
+          <span class="last-loaded-value">${settings.lastFileName || 'URL: ' + settings.lastUrl.substring(0, 50) + '...'}</span>
+        `;
+        
+        const clearButton = document.createElement('button');
+        clearButton.textContent = '×';
+        clearButton.className = 'clear-settings-btn';
+        clearButton.title = 'Clear saved settings';
+        clearButton.addEventListener('click', () => {
+          if (confirm('Clear all saved settings (URL, volume, etc.)?')) {
+            SettingsManager.clear();
+            urlInput.value = '';
+            lastLoadedInfo.remove();
+            ui('🗑️ Player: Settings cleared by user');
+          }
+        });
+        
+        lastLoadedInfo.appendChild(infoText);
+        lastLoadedInfo.appendChild(clearButton);
+        this.container.appendChild(lastLoadedInfo);
+      }
 
       const urlButton = document.createElement('button');
       urlButton.textContent = 'Load from URL';
-      urlButton.style.margin = '8px auto';
-      urlButton.style.padding = '8px 16px';
-      urlButton.style.fontSize = '16px';
+      urlButton.className = 'url-button';
       this.container.appendChild(urlButton);
 
+      // Save URL when loading
       urlButton.addEventListener('click', async () => {
         const url = urlInput.value.trim();
         if (url) {
+          ui('🔗 Player: URL load requested', 'info', { url: url.substring(0, 50) + '...' });
+          updateSetting('lastUrl', url);
           await this.loadFromUrl(url);
         }
       });
+      
+      // Also save URL on Enter key
+      urlInput.addEventListener('keypress', async (e) => {
+        if (e.key === 'Enter') {
+          const url = urlInput.value.trim();
+          if (url) {
+            ui('🔗 Player: URL load requested (Enter key)', 'info', { url: url.substring(0, 50) + '...' });
+            updateSetting('lastUrl', url);
+            await this.loadFromUrl(url);
+          }
+        }
+      });
+      
       this.fileInput = setupFileInput(this.container, this._onFileLoaded.bind(this));
       const canvasObj = initializeCanvas();
       this.canvas = canvasObj.canvas;
       this.ctx = canvasObj.ctx;
       this.container.appendChild(this.canvas);
+      
+      // Initialize accessibility features
+      this._initializeAccessibility();
+      
       setupKeyboardControls({
         onPlayPause: this.togglePlayPause.bind(this),
         onSeekBackward: () => this.seekRelative(-5),
@@ -463,80 +517,199 @@ export class SpiralWaveformPlayer {
       // ✅ Only call createAnimationLoop ONCE, then start it
       const animate = createAnimationLoop(this._draw.bind(this), this.visualState);
       animate(performance.now());
+      system('🎬 Player: Animation loop started');
 
       window.addEventListener('resize', () => {
+        ui('📐 Player: Window resized, updating canvas');
         setupResponsiveCanvas(this.canvas, this.ctx);
         this._draw();
       });
+      
+      // Restore saved volume
+      if (settings.volume !== undefined) {
+        this.setVolume(settings.volume);
+        audioLog('🔊 Player: Restored volume', 'info', { volume: settings.volume });
+      }
+      
+      system('✅ Player: Initialization complete');
     } catch (error) {
+      system('❌ Player: Initialization failed', 'error', error);
       this._showError(error);
     }
   }
 
+  /**
+   * Initialize accessibility features
+   */
+  _initializeAccessibility() {
+    // Setup keyboard navigation
+    this.keyboardNav = new KeyboardNavigationManager();
+    this.keyboardNav.initialize({
+      togglePlayPause: () => this.togglePlayPause(),
+      seekBackward: (seconds) => this.seekRelative(-seconds),
+      seekForward: (seconds) => this.seekRelative(seconds),
+      volumeUp: (amount) => {
+        const audioState = getAudioState();
+        this.setVolume(Math.min(1, audioState.volume + amount));
+      },
+      volumeDown: (amount) => {
+        const audioState = getAudioState();
+        this.setVolume(Math.max(0, audioState.volume - amount));
+      },
+      seekTo: (position) => this.seekToPosition(position),
+      toggleMute: () => {
+        const audioState = getAudioState();
+        this.setVolume(audioState.volume > 0 ? 0 : 1);
+      }
+    });
+
+    // Update canvas ARIA attributes
+    const audioState = getAudioState();
+    AriaManager.updateCanvasAria(this.canvas, audioState);
+    
+    // Make canvas focusable
+    this.canvas.setAttribute('tabindex', '0');
+  }
+
   async _onFileLoaded(result) {
     if (result) {
+      fileLog('📂 Player: File loaded', 'info', { 
+        fileName: result.fileName, 
+        isUrl: result.isUrlLoaded,
+        duration: result.audioBuffer?.duration,
+        channels: result.audioBuffer?.numberOfChannels,
+        samples: result.waveform?.length
+      });
+      
       this._loggedMissingData = false; // Reset the logging flag
       
       // Clear URL audio reference when loading a file (not URL)
       if (!result.isUrlLoaded) {
-        if (window.urlAudioElement) {
-          window.urlAudioElement.pause();
-          window.urlAudioElement = null;
-        }
         if (this._urlAudioElement) {
           this._urlAudioElement.pause();
           this._urlAudioElement = null;
+          window.urlAudioElement = null;
+          audioLog('🔄 Player: Cleared URL audio element for file load');
         }
+      } else {
+        // Store URL audio element globally for playback
+        window.urlAudioElement = this._urlAudioElement;
+        audioLog('🎵 Player: Set global URL audio element for playback');
       }
       
       setAudioBuffer(result.audioBuffer, result.waveform, result.globalMaxAmp);
       await loadAudioForPlayback(result.audioBuffer);
       resetPlayheadAnimation();
+      
+      console.log('🎨 About to call drawCallback, checking state:', {
+        hasDrawCallback: !!this.drawCallback,
+        hasCanvas: !!this.canvas,
+        hasCtx: !!this.ctx,
+        canvasVisible: this.canvas ? (this.canvas.style.display !== 'none' && this.canvas.offsetParent !== null) : false,
+        canvasWidth: this.canvas?.width,
+        canvasHeight: this.canvas?.height
+      });
+      
       this.drawCallback();
+      
+      // Announce loaded audio
+      const audioState = getAudioState();
+      if (result.fileName) {
+        screenReaderAnnouncer.announceLoadComplete(result.fileName, audioState.duration);
+      }
+      
+      fileLog('✅ Player: File ready for playback', 'info', { duration: audioState.duration });
     }
   }
 
   async loadFile(file) {
+    fileLog('📥 Player: Loading file', 'info', { name: file.name, size: file.size, type: file.type });
     const event = { target: { files: [file] } };
     await handleFileLoad(event, this._onFileLoaded.bind(this));
+    
+    // Save filename
+    if (file && file.name) {
+      updateSetting('lastFileName', file.name);
+      fileLog('💾 Player: Saved filename', 'info', { fileName: file.name });
+    }
   }
 
   togglePlayPause() {
     const audioState = getAudioState();
-    if (!audioState.audioBuffer) return;
+    
+    if (!audioState.audioBuffer) {
+      audioLog('⚠️ Player: Play/pause ignored - no audio loaded');
+      return;
+    }
     if (audioState.isPlaying) {
+      audioLog('⏸️ Player: Pausing', 'info', { position: audioState.currentPlayhead.toFixed(2) });
       pauseAudio();
       setPlayingState(false);
+      screenReaderAnnouncer.announcePlayState(false, audioState.currentPlayhead, audioState.duration);
     } else {
+      audioLog('▶️ Player: Playing', 'info', { position: audioState.currentPlayhead.toFixed(2) });
       playAudio(audioState.currentPlayhead).then(success => {
-        if (success) setPlayingState(true);
+        if (success) {
+          setPlayingState(true);
+          screenReaderAnnouncer.announcePlayState(true, audioState.currentPlayhead, audioState.duration);
+        } else {
+          audioLog('❌ Player: Play failed', 'warn');
+        }
       });
     }
     this.drawCallback();
+    
+    // Update ARIA attributes
+    AriaManager.updateCanvasAria(this.canvas, getAudioState());
   }
 
   seekToPosition(normalizedPosition) {
     const audioState = getAudioState();
-    if (!audioState.audioBuffer) return;
+    if (!audioState.audioBuffer) {
+      audioLog('⚠️ Player: Seek ignored - no audio loaded');
+      return;
+    }
     const clampedPosition = Math.max(0, Math.min(1, normalizedPosition));
     const targetTime = clampedPosition * audioState.duration;
+    audioLog('⏩ Player: Seeking', 'info', { 
+      from: audioState.currentPlayhead.toFixed(2), 
+      to: targetTime.toFixed(2),
+      percent: (clampedPosition * 100).toFixed(1) + '%'
+    });
     setPlayhead(targetTime);
     seekTo(targetTime);
     this.drawCallback();
+    
+    // Announce seek position
+    screenReaderAnnouncer.announceSeek(targetTime, audioState.duration);
+    
+    // Update ARIA attributes
+    AriaManager.updateCanvasAria(this.canvas, getAudioState());
   }
 
   seekRelative(deltaSeconds) {
     const audioState = getAudioState();
-    if (!audioState.audioBuffer) return;
+    if (!audioState.audioBuffer) {
+      audioLog('⚠️ Player: Relative seek ignored - no audio loaded');
+      return;
+    }
     const newTime = audioState.currentPlayhead + deltaSeconds;
     const clampedTime = Math.max(0, Math.min(newTime, audioState.duration));
+    audioLog('⏭️ Player: Relative seek', 'info', { 
+      delta: deltaSeconds > 0 ? '+' + deltaSeconds : deltaSeconds,
+      from: audioState.currentPlayhead.toFixed(2),
+      to: clampedTime.toFixed(2)
+    });
     setPlayhead(clampedTime);
     seekTo(clampedTime);
     this.drawCallback();
   }
 
   setVolume(volume) {
+    audioLog('🔊 Player: Volume set', 'info', { volume: (volume * 100).toFixed(0) + '%' });
     setVolume(volume);
+    // Save volume setting
+    updateSetting('volume', volume);
   }
 
   cleanup() {
@@ -556,6 +729,15 @@ export class SpiralWaveformPlayer {
 
   _draw() {
     const audioState = getAudioState();
+
+    console.log('🎨 _draw called:', {
+      hasWaveform: !!audioState.waveform,
+      waveformLength: audioState.waveform?.length,
+      hasAudioBuffer: !!audioState.audioBuffer,
+      duration: audioState.duration,
+      currentPlayhead: audioState.currentPlayhead,
+      isPlaying: audioState.isPlaying
+    });
 
     // ✅ Update playhead from audio during playback (not scrubbing)
     if (audioState.isPlaying && !isScrubbingActive()) {
@@ -584,6 +766,8 @@ export class SpiralWaveformPlayer {
         this._loggedMissingData = true;
       }
       
+      console.log('⚠️ Drawing fallback (no waveform data)');
+      
       // Still draw the play button even without waveform data
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
       
@@ -606,7 +790,27 @@ export class SpiralWaveformPlayer {
   }
 
   _showError(error) {
-    this.container.innerHTML = `<h1>Error: ${error.message}</h1><p>Check the console for details.</p>`;
+    // Hide any loading state
+    hideLoading();
+    
+    // Show styled error overlay
+    showError(error, {
+      dismissible: true,
+      autoDismiss: 8000
+    });
+    
     console.error(error);
   }
 }
+
+// Export debug helpers for browser console
+if (typeof window !== 'undefined') {
+  window.getLayerStats = () => layerManager.getStats();
+  window.resetLayerStats = () => layerManager.resetStats();
+  window.enablePerformanceMonitor = () => enablePerformanceMonitoring();
+  window.printPerformanceReport = () => printPerformanceReport();
+  window.getPerformanceReport = () => performanceMonitor.getReport();
+}
+
+// Auto-enable performance monitoring (can be disabled via console)
+enablePerformanceMonitoring();

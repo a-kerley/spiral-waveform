@@ -1,5 +1,9 @@
 import { CONFIG, easeInOutCubic } from './utils.js';
 import { getAudioState, setPlayhead } from './audio-state.js';
+import { renderState, RenderComponents, needsRedraw } from './render-state.js';
+import { frameStart, markOperationStart, markOperationEnd } from './performance-monitor.js';
+import { getCurrentTime } from './audio-playback.js';
+import { isPlayheadAnimating } from './waveform-draw.js';
 
 export function createAnimationLoop(drawCallback, visualState) {
   let lastTimestamp = null;
@@ -8,6 +12,9 @@ export function createAnimationLoop(drawCallback, visualState) {
 
   function animate(timestamp) {
     try {
+      // Mark frame start for FPS tracking
+      frameStart();
+      
       if (!lastTimestamp) lastTimestamp = timestamp;
       const delta = (timestamp - lastTimestamp) / 1000;
       lastTimestamp = timestamp;
@@ -31,9 +38,27 @@ export function createAnimationLoop(drawCallback, visualState) {
       // Handle playback
       updatePlayback(delta, timestamp, visualState, audioState);
 
-      // Draw when we have audio loaded
+      // Draw only when we have audio loaded AND something is dirty
       if (audioState.waveform && audioState.audioBuffer) {
-        drawCallback();
+        // Mark playhead dirty if animation is running (BEFORE needsRedraw check)
+        if (isPlayheadAnimating()) {
+          renderState.markDirty(RenderComponents.PLAYHEAD);
+        }
+        
+        if (needsRedraw()) {
+          // Measure render time
+          markOperationStart('render');
+          drawCallback();
+          markOperationEnd('render');
+          
+          renderState.frameRendered();
+        } else {
+          // Log occasionally to see if animation loop is running
+          if (Math.random() < 0.02) {
+            console.log('⏭️ Animation loop running but frame skipped - nothing dirty');
+          }
+          renderState.frameSkipped();
+        }
       }
     } catch (error) {
       console.error('🚨 Animation loop error:', error);
@@ -77,6 +102,8 @@ function handleEndOfFile(timestamp, visualState, audioState) {
     // Reset playhead to 0 after a brief delay (but before transition completes)
     if (resetElapsed >= resetDuration * 0.3 && audioState.currentPlayhead > 0.1) {
       setPlayhead(0);
+      renderState.markDirty(RenderComponents.PLAYHEAD);
+      renderState.markDirty(RenderComponents.TIME_DISPLAY);
       console.log('🔄 Playhead reset to start during end-of-file transition');
     }
     
@@ -144,6 +171,7 @@ function updateTransitions(timestamp, visualState, audioState) {
 
 function updatePlayback(delta, timestamp, visualState, audioState) {
   const playbackJustStarted = audioState.isPlaying && !visualState.wasPlaying;
+  const playbackJustStopped = !audioState.isPlaying && visualState.wasPlaying;
   
   if (playbackJustStarted) {
     // ✅ UPDATED: Cancel any ongoing end-of-file reset when playback starts
@@ -159,6 +187,30 @@ function updatePlayback(delta, timestamp, visualState, audioState) {
       visualState.isTransitioning = true;
       visualState.transitionStartTime = timestamp - (visualState.animationProgress * CONFIG.TRANSITION_DURATION);
       visualState.lastStateChange = timestamp;
+    }
+  }
+  
+  // Handle playback stopping (animate out to full view)
+  if (playbackJustStopped && !visualState.isDragging && !visualState.isEndOfFileReset) {
+    const actualDuration = audioState.audioBuffer ? audioState.audioBuffer.duration : 0;
+    const isAtEnd = audioState.currentPlayhead >= (actualDuration - 0.1);
+    
+    // Only animate out if we're not at the end (end-of-file is handled separately)
+    if (!isAtEnd && visualState.animationProgress > 0 && !visualState.isTransitioning) {
+      visualState.isTransitioning = true;
+      visualState.transitionStartTime = timestamp - ((1 - visualState.animationProgress) * CONFIG.TRANSITION_DURATION);
+      visualState.lastStateChange = timestamp;
+      console.log('🎬 Playback stopped - animating out to full view');
+    }
+  }
+  
+  // Update playhead position during playback
+  if (audioState.isPlaying) {
+    const currentTime = getCurrentTime();
+    if (Math.abs(currentTime - audioState.currentPlayhead) > 0.016) { // ~1 frame tolerance
+      setPlayhead(currentTime);
+      renderState.markDirty(RenderComponents.PLAYHEAD);
+      renderState.markDirty(RenderComponents.TIME_DISPLAY);
     }
   }
   

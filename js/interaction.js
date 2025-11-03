@@ -3,25 +3,17 @@ import { getAudioState } from './audio-state.js';
 import { startScrubbing, updateScrubbing, stopScrubbing, isAudioPlaying, isScrubbingActive, getScrubState } from './audio-playback.js';
 import { InteractionValidation, CanvasValidation, ValidationError, TypeValidator, safeExecute, ensureType } from './validation.js';
 import { interaction, system } from './logger.js';
+import { CanvasCoordinates, getCanvasCoordinates, toPolarCoordinates, calculateDistance, calculateAngle } from './canvas-math.js';
+import { renderState, RenderComponents } from './render-state.js';
+import { syncInteractionWithScrubState, stopDragging as cleanupDragStateAdapter } from './interaction-state-adapter.js';
 
-// ✅ NEW: Helper function to ensure interaction state consistency
-function syncInteractionWithScrubState(state) {
-  const scrubState = getScrubState();
-  
-  // Ensure interaction state matches audio scrubbing state
-  if (scrubState.isScrubbing && !state.isDragging) {
-    console.warn('⚠️ Scrubbing active but interaction not dragging - syncing states');
-    state.isDragging = true;
-    state.dragWasPlaying = scrubState.wasPlaying;
-    state.dragCurrentPosition = scrubState.currentPosition;
-  } else if (!scrubState.isScrubbing && state.isDragging) {
-    console.warn('⚠️ Interaction dragging but scrubbing not active - cleaning up');
-    cleanupDragState(state);
-  }
-}
+// ✅ MIGRATION NOTE: syncInteractionWithScrubState and cleanupDragState now come from interaction-state-adapter.js
+// This ensures interaction state is managed through StateManager
 
-// ✅ NEW: Centralized drag state cleanup
+// Helper function for backward compatibility with visualState parameter
 function cleanupDragState(state) {
+  cleanupDragStateAdapter();
+  // Also update the passed visualState object for backward compatibility
   state.isDragging = false;
   state.dragCurrentPosition = undefined;
   state.dragStartAngle = undefined;
@@ -186,9 +178,9 @@ export function setupInteraction(canvas, state, drawCallback, audioCallbacks = {
         // ✅ NEW: Calculate touch distance for tap detection
         let touchDistance = 0;
         if (touchStartPosition) {
-          touchDistance = Math.sqrt(
-            Math.pow(touch.clientX - touchStartPosition.x, 2) + 
-            Math.pow(touch.clientY - touchStartPosition.y, 2)
+          touchDistance = calculateDistance(
+            touch.clientX, touch.clientY,
+            touchStartPosition.x, touchStartPosition.y
           );
         }
         
@@ -206,17 +198,21 @@ export function setupInteraction(canvas, state, drawCallback, audioCallbacks = {
           const cy = height / 2;
           
           const buttonRadius = Math.min(width, height) * CONFIG.BUTTON_RADIUS_RATIO;
-          const buttonDistance = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+          const buttonDistance = calculateDistance(x, y, cx, cy);
           
           // ✅ NEW: Handle tap on play button
           if (buttonDistance <= buttonRadius) {
+            interaction('🎵 Play button tapped');
             if (audioCallbacks.onPlayPause) {
+              interaction('📞 Calling onPlayPause callback');
               audioCallbacks.onPlayPause();
+            } else {
+              interaction('⚠️ No onPlayPause callback available');
             }
           }
           // ✅ NEW: Handle tap on waveform (seek functionality)
           else {
-            const distance = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+            const distance = calculateDistance(x, y, cx, cy);
             const waveformInnerRadius = buttonRadius + Math.min(width, height) * CONFIG.WAVEFORM_GAP_RATIO;
             const maxWaveformThickness = Math.min(width, height) * CONFIG.WAVEFORM_THICKNESS_RATIO;
             const waveformOuterRadius = waveformInnerRadius + maxWaveformThickness;
@@ -246,14 +242,13 @@ export function setupInteraction(canvas, state, drawCallback, audioCallbacks = {
     
     // Clean up any ongoing drag operation
     if (state.isDragging) {
+      interaction('🚫 Interaction: Touch cancelled - cleaning up');
       handleMouseLeave(state, drawCallback);
     }
     
     // Reset touch tracking state
     touchStartTime = 0;
     touchStartPosition = null;
-    
-    console.log('🚫 Touch cancelled - cleaned up interaction state');
   });
   
   } catch (error) {
@@ -263,14 +258,8 @@ export function setupInteraction(canvas, state, drawCallback, audioCallbacks = {
 }
 
 function calculateAngleFromMouse(x, y, cx, cy) {
-  // Calculate raw angle from mouse position (-π to π)
-  const rawAngle = Math.atan2(y - cy, x - cx);
-  
-  // Convert to normalized angle (0 to 2π) starting from top (12 o'clock)
-  // Subtract π/2 to start from top, then invert direction for clockwise = forward
-  let normalizedAngle = (-rawAngle + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
-  
-  return normalizedAngle;
+  // Use shared canvas math utility for consistent angle calculation
+  return calculateAngle(x, y, cx, cy);
 }
 
 function handleMouseDown(event, canvas, state, drawCallback, audioCallbacks) {
@@ -286,14 +275,15 @@ function handleMouseDown(event, canvas, state, drawCallback, audioCallbacks) {
   const cy = height / 2;
   
   const buttonRadius = Math.min(width, height) * CONFIG.BUTTON_RADIUS_RATIO;
-  const buttonDistance = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+  const buttonDistance = calculateDistance(x, y, cx, cy);
   
   if (buttonDistance <= buttonRadius) {
+    interaction('🖱️ Interaction: Button clicked');
     if (audioCallbacks.onPlayPause) {
       audioCallbacks.onPlayPause();
     }
   } else {
-    const distance = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+    const distance = calculateDistance(x, y, cx, cy);
     const waveformInnerRadius = buttonRadius + Math.min(width, height) * CONFIG.WAVEFORM_GAP_RATIO;
     const maxWaveformThickness = Math.min(width, height) * CONFIG.WAVEFORM_THICKNESS_RATIO;
     const waveformOuterRadius = waveformInnerRadius + maxWaveformThickness;
@@ -309,21 +299,25 @@ function handleMouseDown(event, canvas, state, drawCallback, audioCallbacks) {
         
         // ✅ IMPROVED: Validate scrubbing started successfully
         if (!isScrubbingActive()) {
-          console.error('❌ Failed to start scrubbing');
+          system('❌ Interaction: Failed to start scrubbing', 'error');
           return;
         }
         
         // ✅ UPDATED: Log scrubbing mode for clarity
         if (wasPlaying) {
-          console.log('🎚️ Started audio scrubbing (was playing)');
+          interaction('🖱️ Interaction: Drag started (audio scrubbing)', 'info');
         } else {
-          console.log('🎚️ Started silent scrubbing (was paused)');
+          interaction('🖱️ Interaction: Drag started (silent)', 'info');
         }
         
         // Store drag state - ensure consistency with scrubbing state
         state.isDragging = true;
         state.dragWasPlaying = wasPlaying;
         state.lastStateChange = performance.now();
+        
+        // Mark components dirty when dragging starts
+        renderState.markDirty(RenderComponents.PLAYHEAD);
+        renderState.markDirty(RenderComponents.UI);
         
         // Force transition to focus view if not already there
         if (state.animationProgress < 1 && !state.isTransitioning) {
@@ -341,7 +335,7 @@ function handleMouseDown(event, canvas, state, drawCallback, audioCallbacks) {
         
         drawCallback();
       } catch (error) {
-        console.error('❌ Error starting scrubbing:', error);
+        system('❌ Interaction: Error starting scrubbing', 'error', error);
         cleanupDragState(state);
       }
     }
@@ -353,7 +347,7 @@ function handleMouseMove(event, canvas, state, drawCallback, audioCallbacks = {}
   if (!state.isDragging) return;
   
   if (!isScrubbingActive()) {
-    console.warn('⚠️ Dragging without scrubbing - cleaning up inconsistent state');
+    interaction('⚠️ Interaction: Inconsistent state - dragging without scrubbing', 'warn');
     cleanupDragState(state);
     drawCallback();
     return;
@@ -394,7 +388,7 @@ function handleMouseMove(event, canvas, state, drawCallback, audioCallbacks = {}
     try {
       const success = updateScrubbing(velocity, newPosition);
       if (!success) {
-        console.warn('⚠️ Failed to update scrubbing');
+        interaction('⚠️ Interaction: Scrub update failed', 'warn');
         return;
       }
       
@@ -402,7 +396,7 @@ function handleMouseMove(event, canvas, state, drawCallback, audioCallbacks = {}
       state.lastDragPosition = newPosition;
       state.lastDragTime = now;
     } catch (error) {
-      console.error('❌ Error updating scrubbing:', error);
+      system('❌ Interaction: Error updating scrubbing', 'error', error);
       // Don't break the drag operation for update errors
     }
   }
@@ -418,7 +412,7 @@ function handleMouseUp(event, canvas, state, drawCallback, audioCallbacks = {}) 
   
   // ✅ NEW: Validate scrubbing state before finishing
   if (!isScrubbingActive()) {
-    console.warn('⚠️ MouseUp without active scrubbing - cleaning up');
+    interaction('⚠️ Interaction: MouseUp without active scrubbing', 'warn');
     cleanupDragState(state);
     drawCallback();
     return;
@@ -449,9 +443,12 @@ function handleMouseUp(event, canvas, state, drawCallback, audioCallbacks = {}) 
   // ✅ IMPROVED: Stop scrubbing with error handling
   try {
     const scrubResult = stopScrubbing(finalPosition, state.dragWasPlaying);
-    console.log(`🎚️ Scrubbing completed: finalPos=${scrubResult.finalPosition.toFixed(3)}, resume=${scrubResult.shouldResume}`);
+    interaction(`🖱️ Interaction: Drag completed`, 'info', { 
+      position: (scrubResult.finalPosition * 100).toFixed(1) + '%',
+      resuming: scrubResult.shouldResume 
+    });
   } catch (error) {
-    console.error('❌ Error stopping scrubbing:', error);
+    system('❌ Interaction: Error stopping scrubbing', 'error', error);
     // Force cleanup even if stopScrubbing failed
   }
   
@@ -465,14 +462,16 @@ function handleMouseUp(event, canvas, state, drawCallback, audioCallbacks = {}) 
 
 function handleMouseLeave(state, drawCallback) {
   if (state.isDragging) {
+    interaction('🖱️ Interaction: Mouse left canvas - stopping drag');
+    
     // ✅ IMPROVED: Stop scrubbing properly with error handling
     const finalPosition = state.dragCurrentPosition || state.dragStartPlayhead || 0;
     
     try {
       const scrubResult = stopScrubbing(finalPosition, state.dragWasPlaying);
-      console.log(`🎚️ Mouse leave - scrubbing stopped: pos=${scrubResult.finalPosition.toFixed(3)}`);
+      interaction(`🖱️ Interaction: Drag ended`, 'info', { position: (scrubResult.finalPosition * 100).toFixed(1) + '%' });
     } catch (error) {
-      console.error('❌ Error stopping scrubbing on mouse leave:', error);
+      system('❌ Interaction: Error on mouse leave', 'error', error);
     }
     
     // ✅ IMPROVED: Clean up drag state using centralized function
@@ -482,12 +481,4 @@ function handleMouseLeave(state, drawCallback) {
   }
 }
 
-function getCanvasCoordinates(event, canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  
-  return {
-    x: (event.clientX - rect.left) * (canvas.width / rect.width) / dpr,
-    y: (event.clientY - rect.top) * (canvas.height / rect.height) / dpr
-  };
-}
+// Removed: getCanvasCoordinates - now imported from canvas-math.js

@@ -30,8 +30,6 @@ class Logger {
       window.location.protocol === 'file:' ||
       // Explicit debug flag
       new URLSearchParams(window.location.search).has('debug') ||
-      // Development build flag
-      window.DEBUG === true ||
       // Console availability check
       typeof console !== 'undefined' && console.assert
     );

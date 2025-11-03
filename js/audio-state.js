@@ -1,66 +1,22 @@
-// Centralized audio state
-const audioState = {
-  audioBuffer: null,
-  waveform: null,
-  globalMaxAmp: 1,
-  currentPlayhead: 0,
-  isPlaying: false,
-  duration: 0
-};
+/**
+ * Audio State Module
+ * 
+ * MIGRATION NOTE: This module now re-exports from audio-state-adapter.js
+ * which uses StateManager internally. This maintains backward compatibility
+ * while transitioning to the new state management system.
+ * 
+ * All audio state is now managed by StateManager under the 'audio' path.
+ * The adapter provides the same API as before, so no changes are needed
+ * in consuming modules during the migration.
+ */
 
-export function getAudioState() {
-  return audioState;
-}
-
-export function setAudioBuffer(buffer, waveform, maxAmp) {
-  console.log('🔧 setAudioBuffer called with:', {
-    hasBuffer: !!buffer,
-    bufferDuration: buffer ? buffer.duration : 'N/A',
-    bufferChannels: buffer ? buffer.numberOfChannels : 'N/A',
-    hasWaveform: !!waveform,
-    waveformLength: waveform ? waveform.length : 0,
-    waveformConstructor: waveform ? waveform.constructor.name : 'N/A',
-    maxAmp,
-    maxAmpType: typeof maxAmp
-  });
-  
-  audioState.audioBuffer = buffer;
-  audioState.waveform = waveform;
-  audioState.globalMaxAmp = maxAmp;
-  
-  // For URL-loaded audio, use the HTML audio element duration if available
-  if (window.urlAudioElement && window.urlAudioElement.duration) {
-    audioState.duration = window.urlAudioElement.duration;
-  } else {
-    audioState.duration = buffer ? buffer.duration : 0;
-  }
-  
-  audioState.currentPlayhead = 0;
-  audioState.isPlaying = false;
-  
-  console.log('✅ Audio state updated:', {
-    hasAudioBuffer: !!audioState.audioBuffer,
-    hasWaveform: !!audioState.waveform,
-    waveformLength: audioState.waveform ? audioState.waveform.length : 0,
-    globalMaxAmp: audioState.globalMaxAmp,
-    duration: audioState.duration,
-    isUrlAudio: !!window.urlAudioElement
-  });
-}
-
-export function setPlayhead(time) {
-  audioState.currentPlayhead = Math.max(0, Math.min(time, audioState.duration));
-}
-
-export function setPlayingState(playing) {
-  audioState.isPlaying = playing;
-}
-
-export function resetAudioState() {
-  audioState.audioBuffer = null;
-  audioState.waveform = null;
-  audioState.globalMaxAmp = 1;
-  audioState.currentPlayhead = 0;
-  audioState.isPlaying = false;
-  audioState.duration = 0;
-}
+export {
+  getAudioState,
+  setAudioBuffer,
+  setPlayhead,
+  setPlayingState,
+  resetAudioState,
+  disposeAudioState,
+  initializeAudioStateSubscriptions,
+  stateManager
+} from './audio-state-adapter.js';

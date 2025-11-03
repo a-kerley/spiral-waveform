@@ -3,6 +3,7 @@ import { CONFIG } from './utils.js';
 // ✅ NEW: Error types for better error handling
 import { CanvasValidation, ValidationError, TypeValidator, ensureType } from './validation.js';
 import { canvas as canvasLog, system } from './logger.js';
+import { layerManager } from './layer-manager.js';
 
 class CanvasError extends Error {
   constructor(message, type = 'CANVAS_ERROR') {
@@ -87,6 +88,14 @@ export function setupResponsiveCanvas(canvas, context) {
       
     } catch (transformError) {
       throw new CanvasError(`Failed to setup canvas transform: ${transformError.message}`, 'TRANSFORM_FAILED');
+    }
+    
+    // ✅ NEW: Initialize layer manager for performance optimization
+    try {
+      layerManager.initialize(canvasWidth, canvasHeight, dpr);
+    } catch (layerError) {
+      canvasLog(`Failed to initialize layer manager: ${layerError.message}`, 'warn');
+      // Non-fatal error - continue with non-layered rendering
     }
     
     canvasLog(`Canvas setup complete: ${finalSize}px display (${canvasWidth}x${canvasHeight} internal, DPR: ${dpr})`, 'info');

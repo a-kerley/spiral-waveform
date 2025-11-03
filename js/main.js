@@ -17,26 +17,13 @@ import { initializeAudio } from './audio-playback.js';
 import { setupFileInput } from './file-handler.js';
 import { createUI, setupKeyboardControls } from './ui-controls.js';
 import { togglePlayPause, seekToPosition, seekRelative, updatePlayheadFromAudio } from './audio-controls.js';
-import { getAudioState } from './audio-state.js';
+import { getAudioState, initializeAudioStateSubscriptions } from './audio-state.js';
+import { createVisualStateProxy, getVisualState, initializeVisualStateSubscriptions } from './visual-state-adapter.js';
 import logger, { system, canvas as canvasLog, ui, file, audio, interaction, animation } from './logger.js';
 import { CanvasValidation, InteractionValidation, ValidationError } from './validation.js';
 
-// UI/Visual state (separate from audio state)
-const visualState = {
-  isTransitioning: false,
-  transitionStartTime: 0,
-  animationProgress: 0,
-  lastStateChange: 0,
-  isDragging: false,
-  wasPlaying: false,
-  // ✅ NEW: End-of-file reset state
-  isEndOfFileReset: false,
-  endOfFileResetStartTime: null,
-  // ✅ NEW: Drag state properties for resize preservation
-  dragCurrentPosition: null,
-  dragStartAngle: null,
-  dragStartPlayhead: null
-};
+// Create visual state proxy (syncs with StateManager)
+const visualState = createVisualStateProxy();
 
 // ✅ ENHANCED: Canvas state validation utility with type checking
 function validateCanvasState() {
@@ -107,6 +94,17 @@ let canvas, ctx, drawCallback;
 // Initialize application
 async function init() {
   try {
+    system('🚀 Main: Starting application initialization');
+    
+    // Initialize audio state subscriptions
+    system('Initializing audio state subscriptions...');
+    await initializeAudioStateSubscriptions();
+    system('Audio state subscriptions initialized');
+    
+    system('Initializing visual state subscriptions...');
+    await initializeVisualStateSubscriptions();
+    system('Visual state subscriptions initialized');
+    
     // Initialize audio system
     audio('Initializing audio system...');
     logger.time('audio-initialization', 'audio');
@@ -154,6 +152,7 @@ async function init() {
     // Enhanced draw callback
     drawCallback = () => {
       const audioState = getAudioState();
+      const currentVisualState = getVisualState(); // Get fresh visual state
       
       // ✅ NEW: Debug logging for waveform drawing issues
       console.log('🎨 Draw callback debug:', {
@@ -163,8 +162,8 @@ async function init() {
         audioBufferDuration: audioState.audioBuffer ? audioState.audioBuffer.duration : 'N/A',
         currentPlayhead: audioState.currentPlayhead,
         isPlaying: audioState.isPlaying,
-        visualStateKeys: Object.keys(visualState),
-        combinedStateKeys: audioState.waveform && audioState.audioBuffer ? Object.keys({ ...visualState, ...audioState }) : 'N/A'
+        visualStateKeys: Object.keys(currentVisualState),
+        combinedStateKeys: audioState.waveform && audioState.audioBuffer ? Object.keys({ ...currentVisualState, ...audioState }) : 'N/A'
       });
       
       if (audioState.waveform && audioState.audioBuffer) {
@@ -173,7 +172,7 @@ async function init() {
         
         const normalizedPlayhead = audioState.duration > 0 ? 
           audioState.currentPlayhead / audioState.duration : 0;
-        const combinedState = { ...visualState, ...audioState };
+        const combinedState = { ...currentVisualState, ...audioState };
         
         console.log('🖼️ About to draw waveform with:', {
           normalizedPlayhead,
@@ -200,6 +199,7 @@ async function init() {
       onSeek: seekToPosition
     });
     interaction('Interaction handlers configured successfully');
+    interaction('Interaction handlers configured successfully');
 
     // Start animation loop
     animation('Starting animation loop...');
@@ -207,10 +207,10 @@ async function init() {
     animate(performance.now());
     animation('Animation loop started successfully');
 
-    system('Spiral Waveform initialized successfully', 'info');
+    system('✅ Main: Application initialization complete', 'info');
     
   } catch (error) {
-    system('Initialization failed', 'error', error);
+    system('❌ Main: Initialization failed', 'error', error);
     logger.error('Error stack trace', 'system', error.stack);
     // Display error on page
     const container = document.querySelector('.container');
@@ -221,7 +221,7 @@ async function init() {
 }
 
 init().catch(error => {
-  system('Init function failed', 'error', error);
+  system('❌ Main: Init function failed', 'error', error);
 });
 
 // ✅ IMPROVED: Enhanced canvas resize handling with state preservation

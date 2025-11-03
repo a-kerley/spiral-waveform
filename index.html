@@ -4,10 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Spiral Waveform Audio Player</title>
+    <meta name="description" content="Interactive circular audio waveform visualizer with playback controls">
     <link rel="stylesheet" href="css/styles.css">
   </head>
   <body>
-    <div class="container" id="spiral-player-container"></div>
+    <!-- Live region for screen reader announcements -->
+    <div id="sr-announcements" role="status" aria-live="polite" aria-atomic="true" class="sr-only"></div>
+    
+    <main role="main">
+      <div class="container" id="spiral-player-container" role="region" aria-label="Audio player"></div>
+    </main>
     <script type="module">
       import { SpiralWaveformPlayer } from './js/spiral-waveform-player.js';
       // Instantiate the player component and attach to the container

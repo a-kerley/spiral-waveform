@@ -1,5 +1,6 @@
 // ✅ Comprehensive type validation utilities for production safety
 import { system } from './logger.js';
+import { ValidationConfig } from './validation-config.js';
 
 // ✅ NEW: Core type checking utilities
 export class TypeValidator {
@@ -157,11 +158,25 @@ export class TypeValidator {
 // ✅ NEW: Validation error types
 export class ValidationError extends Error {
   constructor(message, field = null, value = null, expectedType = null) {
-    super(message);
+    // In production, simplify error messages
+    const errorMessage = ValidationConfig.features.verboseErrors 
+      ? message 
+      : `Validation failed${field ? ` for ${field}` : ''}`;
+    
+    super(errorMessage);
     this.name = 'ValidationError';
     this.field = field;
-    this.value = value;
-    this.expectedType = expectedType;
+    
+    // Only include detailed info in development
+    if (ValidationConfig.features.verboseErrors) {
+      this.value = value;
+      this.expectedType = expectedType;
+    }
+    
+    // Include stack trace only in development
+    if (!ValidationConfig.features.stackTraces) {
+      this.stack = undefined;
+    }
   }
 }
 
@@ -196,9 +211,42 @@ export function validateParams(validators) {
   };
 }
 
+// ✅ Performance-aware validation wrapper
+function withPerformanceTracking(className, methodName, fn) {
+  return function(...args) {
+    // Skip performance tracking in production for critical path
+    if (!ValidationConfig.features.performanceMonitoring) {
+      return fn.apply(this, args);
+    }
+    
+    const operationName = `${className}.${methodName}`;
+    const startTime = performance.now();
+    let result;
+    
+    try {
+      result = fn.apply(this, args);
+    } finally {
+      const duration = performance.now() - startTime;
+      ValidationConfig.performanceMetrics.record(operationName, duration);
+      
+      // Warn if validation is taking too long
+      if (duration > ValidationConfig.features.performanceThresholds.fileValidation) {
+        console.warn(`⚠️ Slow validation: ${operationName} took ${duration.toFixed(2)}ms`);
+      }
+    }
+    
+    return result;
+  };
+}
+
 // ✅ NEW: Comprehensive validation functions for common use cases
 export class AudioValidation {
   static validatePlayhead(playhead, context = 'playhead') {
+    // Skip non-critical validation in production
+    if (!ValidationConfig.shouldValidate(ValidationConfig.levels.STANDARD)) {
+      return typeof playhead === 'number' ? Math.max(0, playhead) : 0;
+    }
+    
     if (!TypeValidator.isNumber(playhead, { min: 0, allowInfinite: false })) {
       throw new ValidationError(`Invalid ${context}: must be a non-negative finite number`, context, playhead, 'number');
     }
@@ -502,7 +550,14 @@ export function withValidation(fn, paramValidators = [], returnValidator = null,
 }
 
 // ✅ NEW: Batch validation utility
-export function validateAll(validations) {
+export function validateAll(validations, options = {}) {
+  const { level = ValidationConfig.levels.STANDARD } = options;
+  
+  // Skip validation if level is too low
+  if (!ValidationConfig.shouldValidate(level)) {
+    return true;
+  }
+  
   const errors = [];
   
   validations.forEach(({ value, validator, context, required = true }) => {
@@ -527,7 +582,9 @@ export function validateAll(validations) {
   });
   
   if (errors.length > 0) {
-    const combinedMessage = `Multiple validation errors: ${errors.map(e => e.message).join('; ')}`;
+    const combinedMessage = ValidationConfig.features.verboseErrors
+      ? `Multiple validation errors: ${errors.map(e => e.message).join('; ')}`
+      : `Validation failed (${errors.length} error${errors.length > 1 ? 's' : ''})`;
     throw new ValidationError(combinedMessage, 'batch', errors);
   }
   
